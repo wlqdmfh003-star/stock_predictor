@@ -25,7 +25,7 @@ jobs:
       run: |
         pip install streamlit pandas numpy yfinance \
           xgboost lightgbm catboost torch \
-          requests beautifulsoup4 plotly \
+          scikit-learn requests beautifulsoup4 plotly \
           transformers sentencepiece pykrx
 
     - name: 분석 실행
