@@ -1,0 +1,95 @@
+name: 주식 예측 자동 실행
+
+on:
+  schedule:
+    - cron: '30 21 * * 1-5'  # 한국시간 06:30
+    - cron: '0 3 * * 1-5'    # 한국시간 12:00
+    - cron: '0 8 * * 1-5'    # 한국시간 17:00
+    - cron: '30 14 * * 1-5'  # 한국시간 23:30
+  workflow_dispatch:          # 수동 실행 가능
+
+jobs:
+  run-prediction:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 코드 받기
+      uses: actions/checkout@v4
+
+    - name: Python 설치
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: 패키지 설치
+      run: |
+        pip install streamlit pandas numpy yfinance \
+          xgboost lightgbm catboost torch \
+          requests beautifulsoup4 plotly \
+          transformers sentencepiece pykrx
+
+    - name: 분석 실행
+      env:
+        KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+        KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+        KIS_ACCOUNT: ${{ secrets.KIS_ACCOUNT }}
+        NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+        NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+        DART_API_KEY: ${{ secrets.DART_API_KEY }}
+      run: |
+        python -c "
+        import os, sys
+        sys.path.insert(0, '.')
+
+        kis_key    = os.environ.get('KIS_APP_KEY', '')
+        kis_secret = os.environ.get('KIS_APP_SECRET', '')
+        kis_acct   = os.environ.get('KIS_ACCOUNT', '')
+        naver_id   = os.environ.get('NAVER_CLIENT_ID', '')
+        naver_sec  = os.environ.get('NAVER_CLIENT_SECRET', '')
+        dart_key   = os.environ.get('DART_API_KEY', '')
+
+        print('자동 분석 시작...')
+
+        from utils.data_fetcher import DataFetcher
+        from utils.news_sentiment import NewsSentiment
+        from utils.fundamental import FundamentalAnalyzer
+        from utils.dart_disclosure import DartDisclosure
+        from utils.kis_api import KISApi
+        from utils.learning_tracker import LearningTracker
+        from models.lstm_model import LSTMPredictor
+        from models.ensemble_model import EnsembleModel
+        from models.multi_factor import MultiFactorScorer
+
+        # 데이터 수집
+        df = DataFetcher().fetch(market='KOSPI+KOSDAQ', top_n=200)
+        print(f'종목 수집: {len(df)}개')
+
+        # KIS 수급
+        if kis_key and kis_secret:
+            df = KISApi(kis_key, kis_secret, kis_acct).get_institution_data(df)
+
+        # 뉴스 감성
+        df = NewsSentiment(naver_id, naver_sec).analyze(df)
+
+        # 재무
+        df = FundamentalAnalyzer().fetch_and_score(df)
+
+        # DART
+        df = DartDisclosure(dart_key).fetch_and_score(df)
+
+        # LSTM + 앙상블
+        df = LSTMPredictor().predict_batch(df)
+        df = EnsembleModel().predict_batch(df)
+
+        # 최종 점수
+        df = MultiFactorScorer().score(df)
+
+        # 자기학습 저장
+        tracker = LearningTracker()
+        tracker.update_results(df)
+        saved = tracker.save_predictions(df)
+        stats = tracker.get_stats()
+
+        print(f'분석 완료! 저장: {saved}건')
+        print(f'누적: {stats[\"total\"]}건 / 적중률: {stats[\"hit_rate\"]}%')
+        "
