@@ -61,7 +61,7 @@ jobs:
         from models.multi_factor import MultiFactorScorer
 
         # 데이터 수집
-        df = DataFetcher().fetch(market='KOSPI+KOSDAQ', top_n=200)
+        df = DataFetcher(market='KOSPI+KOSDAQ', top_n=200).fetch_all_parallel()
         print(f'종목 수집: {len(df)}개')
 
         # KIS 수급
