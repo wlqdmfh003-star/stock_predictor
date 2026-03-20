@@ -8,14 +8,17 @@ warnings.filterwarnings('ignore')
 
 class DartDisclosure:
     """
-    DART 공시 분석 v2.0
+    DART 공시 분석 v7.0
     ★ 어닝 서프라이즈 감지 (분기 실적 추이 비교)
     ★ 흑자전환 / 적자전환 자동 감지
-    ★ 기존 자사주/유상증자/배당 감지 유지
+    ★ 자사주 취득/소각/처분 정밀 감지 (점수 차별화)
+    ★ 자사주 소각 = 최강 신호 (+30점)
+    ★ 유상증자 = 강한 매도 신호 (-25점)
     """
 
     POS_DISCLOSURES = [
-        "자기주식취득","자기주식처분","현금배당","주식배당","합병",
+        "자기주식취득","자기주식소각","자사주취득","자사주소각",
+        "현금배당","주식배당","합병",
         "영업실적","수시공시","공급계약","업무협약","특허","신제품",
         "흑자전환","실적개선","매출증가","영업이익증가","수주","계약체결",
     ]
@@ -98,13 +101,57 @@ class DartDisclosure:
             return 50.0
         score = 50.0
         for title in titles:
-            for kw in self.POS_DISCLOSURES:
-                if kw in title:
-                    score += 20 if "자기주식취득" in title else 10
-            for kw in self.NEG_DISCLOSURES:
-                if kw in title:
-                    score -= 20 if "유상증자" in title else 10
+            # ★ 자사주 관련 (강한 매수 신호)
+            if "자기주식취득" in title or "자사주취득" in title:
+                score += 25   # 자사주 취득 = 강한 주가 부양 의지
+            elif "자기주식소각" in title or "자사주소각" in title:
+                score += 30   # 자사주 소각 = 최강 주가 부양 신호
+            elif "자기주식처분" in title or "자사주처분" in title:
+                score -= 15   # 자사주 처분 = 매도 압력
+
+            # ★ 긍정 공시
+            elif "현금배당" in title or "주식배당" in title:
+                score += 18
+            elif "수주" in title or "계약체결" in title:
+                score += 15
+            elif "공급계약" in title:
+                score += 12
+            elif "흑자전환" in title or "실적개선" in title:
+                score += 15
+            elif "합병" in title and "소규모" in title:
+                score += 10
+            elif any(kw in title for kw in self.POS_DISCLOSURES):
+                score += 8
+
+            # ★ 부정 공시
+            if "유상증자" in title:
+                score -= 25   # 유상증자 = 강한 매도 신호
+            elif "전환사채" in title or "신주인수권" in title:
+                score -= 18
+            elif "횡령" in title or "배임" in title:
+                score -= 30
+            elif "불성실공시" in title:
+                score -= 20
+            elif "워크아웃" in title or "기업회생" in title:
+                score -= 35
+            elif any(kw in title for kw in self.NEG_DISCLOSURES):
+                score -= 10
+
         return float(np.clip(score, 0, 100))
+
+    def _detect_treasury_stock(self, titles: list) -> dict:
+        """
+        자사주 관련 공시 상세 감지
+        반환: {type, amount, signal}
+        """
+        for title in titles:
+            if "자기주식취득" in title or "자사주취득" in title:
+                return {"type": "취득", "signal": "🟢 강한 매수 신호"}
+            elif "자기주식소각" in title or "자사주소각" in title:
+                return {"type": "소각", "signal": "🔥 최강 매수 신호"}
+            elif "자기주식처분" in title or "자사주처분" in title:
+                return {"type": "처분", "signal": "🔴 매도 압력"}
+        return {"type": "없음", "signal": ""}
 
     # ── 어닝 서프라이즈 ───────────────────────────────────────────
 

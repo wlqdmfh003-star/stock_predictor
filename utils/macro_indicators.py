@@ -8,11 +8,13 @@ warnings.filterwarnings('ignore')
 
 class MacroIndicators:
     """
-    v5.0 매크로 지표 분석
+    v7.0 매크로 지표 분석
     - 미국 금리 (10년물 국채)
     - 달러인덱스 (DXY)
     - 원자재 (WTI유가, 금, 구리)
-    - 공포탐욕 (VIX)
+    - 공포탐욕 (VIX 실제값)
+    ★ 신규: 공포탐욕 지수 5단계 (극단적공포~극단적탐욕)
+    ★ 신규: VIX + S&P500 + 나스닥 + 금 + 달러 종합 계산
     - 한국 관련 ETF (EWY)
     """
 
@@ -150,4 +152,73 @@ class MacroIndicators:
             "score":  round(score, 1),
             "env":    env,
             "detail": macro,
+        }
+
+    # ══════════════════════════════════════════════════════════════
+    # ★ 공포탐욕 지수 + VIX 실제값
+    # ══════════════════════════════════════════════════════════════
+    def get_fear_greed(self, macro: dict) -> dict:
+        """
+        공포탐욕 지수 계산
+        - VIX 실제값 (^VIX yfinance)
+        - 시장 모멘텀 (S&P500 52주 대비)
+        - 안전자산 선호 (금 vs 주식)
+        - 달러 강세 여부
+        0~25: 극단적 공포 / 25~45: 공포 / 45~55: 중립
+        55~75: 탐욕 / 75~100: 극단적 탐욕
+        """
+        scores = {}
+
+        # ① VIX (공포지수 역방향)
+        vix = macro.get("VIX", {}).get("value", 20)
+        if   vix >= 40:  scores["vix"] = 5    # 극단적 공포
+        elif vix >= 30:  scores["vix"] = 20
+        elif vix >= 25:  scores["vix"] = 35
+        elif vix >= 20:  scores["vix"] = 50
+        elif vix >= 15:  scores["vix"] = 65
+        elif vix >= 12:  scores["vix"] = 80
+        else:            scores["vix"] = 95   # 극단적 탐욕
+
+        # ② S&P500 모멘텀
+        sp_chg   = macro.get("S&P500", {}).get("change", 0)
+        sp_trend = macro.get("S&P500", {}).get("trend",  "중립")
+        if   sp_trend == "상승" and sp_chg > 0: scores["sp_mom"] = 75
+        elif sp_trend == "상승":                scores["sp_mom"] = 60
+        elif sp_trend == "하락" and sp_chg < 0: scores["sp_mom"] = 25
+        elif sp_trend == "하락":               scores["sp_mom"] = 40
+        else:                                  scores["sp_mom"] = 50
+
+        # ③ 나스닥 모멘텀
+        nq_chg = macro.get("나스닥", {}).get("change", 0)
+        scores["nq_mom"] = float(np.clip(50 + nq_chg * 5, 10, 90))
+
+        # ④ 금 vs 주식 (안전자산 선호)
+        gold_trend = macro.get("금", {}).get("trend", "중립")
+        if   gold_trend == "상승": scores["safe_haven"] = 30  # 안전자산 선호 → 공포
+        elif gold_trend == "하락": scores["safe_haven"] = 70  # 위험자산 선호 → 탐욕
+        else:                      scores["safe_haven"] = 50
+
+        # ⑤ 달러 강세 (달러 강세 → 신흥국 공포)
+        dxy_chg = macro.get("달러인덱스", {}).get("change", 0)
+        scores["dollar"] = float(np.clip(50 - dxy_chg * 10, 10, 90))
+
+        # 종합 점수 (가중 평균)
+        weights = {"vix":0.30,"sp_mom":0.25,"nq_mom":0.20,
+                   "safe_haven":0.15,"dollar":0.10}
+        fg_score = sum(scores.get(k, 50)*v for k, v in weights.items())
+
+        # 단계 분류
+        if   fg_score >= 75: phase = "극단적탐욕"; icon = "🔥"
+        elif fg_score >= 55: phase = "탐욕";       icon = "😀"
+        elif fg_score >= 45: phase = "중립";       icon = "😐"
+        elif fg_score >= 25: phase = "공포";       icon = "😨"
+        else:                phase = "극단적공포"; icon = "💀"
+
+        return {
+            "score":      round(float(fg_score), 1),
+            "phase":      phase,
+            "icon":       icon,
+            "vix":        round(float(vix), 1),
+            "components": {k: round(v,1) for k,v in scores.items()},
+            "description": f"{icon} {phase} ({fg_score:.0f}점) | VIX={vix:.1f}",
         }

@@ -6,7 +6,7 @@ warnings.filterwarnings('ignore')
 
 class EnsembleModel:
     """
-    v6.0 앙상블 모델 — 피처 109개 + CatBoost 4모델 앙상블
+    v7.0 앙상블 모델 — 피처 109개 + CatBoost 4모델 앙상블 + 메타러닝
     ─ 일봉  50개  모멘텀/이평/오실레이터/거래량/패턴/통계
     ─ 주봉  20개  중기 추세/오실레이터/거래량/패턴
     ─ 월봉  15개  장기 추세/위치/모멘텀
@@ -58,6 +58,11 @@ class EnsembleModel:
         self._minute_features = {}
         # SHAP 설명기
         self._shap_explainer  = None
+        # ★ 메타러닝: 최근 적중률 기반 동적 가중치
+        self._meta_hits   = {"lstm":[], "xgb":[], "lgbm":[], "cat":[]}
+        self._meta_window = 20  # 최근 20번 성과로 가중치 조정
+        self._meta_file   = ".cache/meta_weights.json"
+        self._load_meta_weights()
 
     # ══════════════════════════════════════════════════════════════════════════
     # 피처 추출 — 일봉 50개

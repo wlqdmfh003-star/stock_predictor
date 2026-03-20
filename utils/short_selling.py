@@ -1,3 +1,10 @@
+import sys as _sys
+if _sys.platform == "win32":
+    try:
+        _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 import pandas as pd
 import numpy as np
 import requests
@@ -76,17 +83,19 @@ def _fetch_short_krx(code: str) -> dict:
 
 class ShortSelling:
     """
-    공매도 분석 v2.0
+    공매도 분석 v7.0
     ★ pykrx 완전 제거
     ★ KRX 공매도 잔고 API (무료)
-    ★ 공매도 비율 + 트렌드(감소/증가) 분석
+    ★ 공매도 비율 + 잔고 추이 분석
+    ★ 숏커버링 감지 (공매도 급감 → 강력 상승 신호)
+    ★ 공매도 신호 텍스트 자동 생성
     """
 
     def fetch_and_score(self, df: pd.DataFrame) -> pd.DataFrame:
         df    = df.copy()
         codes = df["code"].tolist()
 
-        print(f"📉 공매도 데이터 수집 중... ({len(codes)}개)")
+        print(f"[공매도] 데이터 수집 중... ({len(codes)}개)")
         short_data = {}
 
         def fetch_one(code):
@@ -102,7 +111,7 @@ class ShortSelling:
                 short_data[code] = data
                 done += 1
                 if done % 20 == 0:
-                    print(f"   공매도 진행: {done}/{len(codes)}")
+                    print(f"     공매도 진행: {done}/{len(codes)}")
 
         scores, ratios = [], []
         for _, row in df.iterrows():
@@ -114,26 +123,55 @@ class ShortSelling:
             scores.append(score)
             ratios.append(ratio)
 
-        df["short_score"] = scores
-        df["short_ratio"] = ratios
+        signals = []
+        for i, (_, row) in enumerate(df.iterrows()):
+            code  = str(row.get("code",""))
+            data  = short_data.get(code, {"ratio":0.0,"trend":0.0})
+            ratio = float(data.get("ratio", 0) or 0)
+            trend = float(data.get("trend", 0) or 0)
+            signals.append(self.get_short_signal(ratio, trend))
+
+        df["short_score"]  = scores
+        df["short_ratio"]  = ratios
+        df["short_signal"] = signals
         return df
 
     def _calc_score(self, ratio: float, trend: float) -> float:
-        """공매도 비율 + 트렌드 → 점수"""
+        """공매도 비율 + 잔고 추이 → 점수"""
         score = self._ratio_to_score(ratio)
 
-        # 트렌드 반영 (공매도 감소 = 호재)
-        if trend < -0.5:   score += 15   # 공매도 크게 감소
-        elif trend < -0.2: score += 8
-        elif trend > 0.5:  score -= 15   # 공매도 크게 증가
-        elif trend > 0.2:  score -= 8
+        # ★ 잔고 추이 반영 (공매도 감소 = 숏커버링 = 강력 상승 신호)
+        if   trend < -1.0:  score += 25   # 공매도 급감 → 숏커버링
+        elif trend < -0.5:  score += 18
+        elif trend < -0.2:  score += 10
+        elif trend > 1.0:   score -= 25   # 공매도 급증 → 하락 압력
+        elif trend > 0.5:   score -= 18
+        elif trend > 0.2:   score -= 10
 
         return float(np.clip(score, 0, 100))
 
     def _ratio_to_score(self, ratio: float) -> float:
-        if ratio <= 0:    return 55.0
-        elif ratio < 0.5: return 70.0
-        elif ratio < 1.0: return 62.0
-        elif ratio < 2.0: return 50.0
-        elif ratio < 5.0: return 38.0
-        else:             return 25.0
+        if   ratio <= 0:    return 55.0
+        elif ratio < 0.5:   return 72.0   # 공매도 거의 없음 → 강한 신호
+        elif ratio < 1.0:   return 62.0
+        elif ratio < 2.0:   return 50.0
+        elif ratio < 5.0:   return 38.0
+        elif ratio < 10.0:  return 28.0
+        else:               return 15.0   # 공매도 폭탄 → 위험
+
+    def get_short_signal(self, ratio: float, trend: float) -> str:
+        """공매도 신호 텍스트 반환"""
+        if ratio <= 0:
+            return "데이터없음"
+        if trend < -1.0 and ratio < 2.0:
+            return "🚀 숏커버링 강력 매수"
+        elif trend < -0.5:
+            return "📈 공매도 감소 (호재)"
+        elif ratio < 0.5:
+            return "✅ 공매도 매우 낮음"
+        elif trend > 1.0:
+            return "🔴 공매도 급증 주의"
+        elif ratio > 5.0:
+            return "⚠️ 공매도 과다"
+        else:
+            return "중립"

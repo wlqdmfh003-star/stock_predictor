@@ -7,11 +7,14 @@ warnings.filterwarnings('ignore')
 
 class SectorAnalysis:
     """
-    v5.0 섹터/업종 분석
+    v7.0 섹터/업종 분석
     - pykrx 완전 제거 (자체 섹터 매핑)
     - 종목 수 3배 확장
     - 방산/조선 섹터 추가
     - 5일 vs 20일 모멘텀 비교로 섹터 로테이션 감지
+    ★ 신규: 섹터 로테이션 전략 (강한 섹터 → 가중치 자동 UP)
+    ★ 신규: 섹터 강도 순위 (TOP3 섹터 집중 추천)
+    ★ 신규: 섹터 모멘텀 기반 종목 점수 가중치 자동 조정
     """
 
     SECTORS = {
@@ -213,3 +216,80 @@ class SectorAnalysis:
                                 if "rise_prob" in sdf.columns and len(sdf) > 0 else "-",
             })
         return pd.DataFrame(rows).sort_values("평균상승확률", ascending=False)
+
+    # ══════════════════════════════════════════════════════════════
+    # ★ 섹터 로테이션 전략 v7.0
+    # ══════════════════════════════════════════════════════════════
+    def get_rotation_strategy(self, df: pd.DataFrame) -> dict:
+        """
+        섹터 로테이션 전략
+        - TOP3 섹터 자동 감지
+        - 강한 섹터 종목 가중치 UP
+        - 약한 섹터 종목 가중치 DOWN
+        반환: {종목코드: 가중치보정값}
+        """
+        if "sector" not in df.columns:
+            df = df.copy()
+            df["sector"] = df["name"].apply(self._get_sector)
+
+        sector_stats = self._calc_sector_stats(df)
+
+        # 섹터 강도 점수 계산
+        sector_strength = {}
+        for sector, stats in sector_stats.items():
+            m5  = stats.get("momentum_5d",  0)
+            m20 = stats.get("momentum_20d", 0)
+            cnt = stats.get("stock_count",  0)
+            avg = stats.get("avg_momentum", 50)
+            if cnt == 0:
+                continue
+            # 강도 = 5일모멘텀(40%) + 5vs20차이(30%) + 평균모멘텀(30%)
+            strength = m5*0.4 + (m5-m20)*0.3 + (avg-50)*0.3
+            sector_strength[sector] = round(float(strength), 2)
+
+        if not sector_strength:
+            return {"top3_sectors": [], "weight_adj": {}, "summary": "데이터 없음"}
+
+        # TOP3 / BOTTOM3 섹터 선정
+        sorted_sectors = sorted(sector_strength.items(), key=lambda x: x[1], reverse=True)
+        top3    = [s[0] for s in sorted_sectors[:3]]
+        bottom3 = [s[0] for s in sorted_sectors[-3:]]
+
+        # 종목별 가중치 보정값 계산
+        weight_adj = {}
+        for _, row in df.iterrows():
+            code   = str(row.get("code", ""))
+            sector = row.get("sector", "기타")
+            if   sector in top3:    weight_adj[code] = +15.0  # TOP 섹터 +15점
+            elif sector in bottom3: weight_adj[code] = -10.0  # 하위 섹터 -10점
+            else:                   weight_adj[code] =   0.0
+
+        return {
+            "top3_sectors":    top3,
+            "bottom3_sectors": bottom3,
+            "sector_strength": sector_strength,
+            "weight_adj":      weight_adj,
+            "summary": f"강세섹터: {' > '.join(top3[:3])} | "
+                       f"약세섹터: {' > '.join(bottom3[:3])}",
+        }
+
+    def apply_rotation_weight(self, df: pd.DataFrame,
+                              rotation: dict) -> pd.DataFrame:
+        """
+        섹터 로테이션 가중치를 종목 점수에 반영
+        total_score가 있을 때 호출
+        """
+        df     = df.copy()
+        adj    = rotation.get("weight_adj", {})
+        if not adj or "total_score" not in df.columns:
+            return df
+
+        new_scores = []
+        for _, row in df.iterrows():
+            code  = str(row.get("code", ""))
+            score = float(row.get("total_score", 50))
+            bonus = adj.get(code, 0.0)
+            new_scores.append(float(np.clip(score + bonus, 0, 100)))
+
+        df["total_score"] = new_scores
+        return df

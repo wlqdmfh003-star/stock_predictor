@@ -73,8 +73,18 @@ class MultiFactorScorer:
         ) / tw
 
         # RSI/MACD 보조
+        # ★ 새 지표 점수 추가 (스토캐스틱/CCI/MFI/OBV/VWAP)
+        for col in ["stoch_score","cci_score","mfi_score","obv_score","vwap_score"]:
+            if col not in df.columns:
+                df[col] = 50.0
+
         df["total_score"] = (
-            df["total_score"] * 0.82 +
+            df["total_score"] * 0.75 +
+            norm("stoch_score") * 0.05 +
+            norm("cci_score")   * 0.05 +
+            norm("mfi_score")   * 0.05 +
+            norm("obv_score")   * 0.05 +
+            norm("vwap_score")  * 0.05 +
             df["f_rsi"]        * 0.10 +
             df["f_macd"]       * 0.08
         )
@@ -87,6 +97,18 @@ class MultiFactorScorer:
 
         # 요일/월말 효과 반영
         df["total_score"] = (df["total_score"] + df["calendar_bonus"]).clip(0,100)
+
+        # ★ 섹터 로테이션 가중치 반영
+        try:
+            from utils.sector_analysis import SectorAnalysis
+            sa       = SectorAnalysis()
+            rotation = sa.get_rotation_strategy(df)
+            df       = sa.apply_rotation_weight(df, rotation)
+            df["total_score"] = df["total_score"].clip(0, 100)
+            if rotation.get("top3_sectors"):
+                pass  # 로테이션 적용 완료
+        except Exception:
+            pass
 
         df["rise_prob"] = df["total_score"].apply(self._to_prob)
 
@@ -232,7 +254,7 @@ class MultiFactorScorer:
 
         excl_names = top_exclude["name"].tolist() if len(top_exclude)>0 else []
         if excl_names:
-            print(f"🔗 상관관계 필터: {len(excl_names)}개 중복 제거 → {excl_names}")
+            print(f"[상관관계] 필터: {len(excl_names)}개 중복 제거 → {excl_names}")
 
         return result
 

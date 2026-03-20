@@ -6,7 +6,7 @@ warnings.filterwarnings('ignore')
 
 class HighLow52Week:
     """
-    52주 신고가/신저가 분석 v2.0
+    52주 신고가/신저가 분석 v7.0
     ★ 거래량 동반 신고가만 강한 신호 처리
     ★ 신고가 돌파 강도 측정
     ★ 연속 신고가 일수 (추세 지속성)
@@ -65,9 +65,14 @@ class HighLow52Week:
             is_new_low    = int(cur_price <= low52  * 1.005)
 
             score = 50.0
-            if   pct_from_high >= -3:  score += 25
-            elif pct_from_high >= -10: score += 15
-            elif pct_from_high >= -20: score += 5
+            # ★ 신고가 근접도 (세분화)
+            if   pct_from_high >= -1:  score += 30   # 신고가 1% 이내
+            elif pct_from_high >= -3:  score += 25
+            elif pct_from_high >= -7:  score += 18
+            elif pct_from_high >= -10: score += 12
+            elif pct_from_high >= -15: score += 6
+            elif pct_from_high >= -20: score += 2
+            elif pct_from_high <= -40: score -= 15
             elif pct_from_high <= -30: score -= 10
 
             breakout_strength = 0.0
@@ -87,7 +92,10 @@ class HighLow52Week:
                                         if prev_high > 0 else 0.0
 
                     if vol_confirmed:
-                        score += 20 if breakout_strength >= self.STRONG_BREAK else 12
+                        # ★ 거래량 동반 신고가 (강한 신호)
+                        if   breakout_strength >= 5.0: score += 30  # 5% 이상 강한 돌파
+                        elif breakout_strength >= self.STRONG_BREAK: score += 22
+                        else: score += 15
                     else:
                         score += 5  # 거래량 없는 신고가는 약한 신호
 
