@@ -22,7 +22,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 st.set_page_config(
-    page_title="📈 내일 주식 상승 예측 v6.0",
+    page_title="📈 내일 주식 상승 예측 v5.3",
     page_icon="📈", layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -75,6 +75,7 @@ from utils.macro_indicators import MacroIndicators
 from utils.learning_tracker  import LearningTracker
 from utils.earnings_calendar import EarningsCalendar
 from utils.stock_cluster     import StockCluster
+from utils.option_strategy   import OptionStrategy
 from models.lstm_model       import LSTMPredictor
 from models.multi_factor     import MultiFactorScorer
 from models.backtester       import Backtester
@@ -120,6 +121,7 @@ with st.sidebar:
     use_corr_filter    = st.checkbox("🔗 상관관계 필터 (포트폴리오 분산)", value=True)
     use_earnings_cal   = st.checkbox("📅 실적 발표 캘린더",              value=True)
     use_clustering     = st.checkbox("🔵 종목 클러스터링 (진짜 분산)",   value=True)
+    use_option         = st.checkbox("🎯 옵션 전략 분석",                 value=True)
 
     if use_backtest:
         bt_period = st.selectbox(
@@ -209,10 +211,10 @@ if _banner_stats["completed"] > 0:
     </div>
     """, unsafe_allow_html=True)
 
-tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8,tab9,tab10,tab11 = st.tabs([
+tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8,tab9,tab10,tab11,tab12 = st.tabs([
     "🎯 예측결과","🌎 미국/매크로","🏭 섹터","🕯️ 캔들패턴",
     "📊 시장국면","🔗 포트폴리오","📋 백테스트","🧬 자기학습",
-    "🔍 예측설명","🔵 클러스터링","📖 가이드 v6.0"
+    "🔍 예측설명","🔵 클러스터링","🎯 옵션전략","📖 가이드 v7.0"
 ])
 
 if analyze_btn:
@@ -914,12 +916,92 @@ if analyze_btn:
         else:
             st.info("사이드바에서 '🔵 종목 클러스터링' 체크 후 재실행하세요.")
 
+    # ════════════════════════════════════════════════════════════════════════
+    # 탭 11: 옵션 전략
+    # ════════════════════════════════════════════════════════════════════════
+    with tab11:
+        st.markdown("### 🎯 옵션 전략 분석 — Black-Scholes 기반 끝판왕")
+
+        if "option_strategy" in df.columns:
+            # 시장 옵션 시그널
+            if "opt_signal" in dir() and opt_signal:
+                st.markdown("#### 📡 시장 전체 옵션 시그널")
+                sig_cols = st.columns(5)
+                with sig_cols[0]: st.metric("평균 IV",      f"{opt_signal.get('avg_iv',0):.1f}%")
+                with sig_cols[1]: st.metric("평균 Delta",   f"{opt_signal.get('avg_delta',0):.3f}")
+                with sig_cols[2]: st.metric("고IV 종목",    f"{opt_signal.get('high_iv_count',0)}개")
+                with sig_cols[3]: st.metric("저IV 종목",    f"{opt_signal.get('low_iv_count',0)}개")
+                with sig_cols[4]: st.metric("추천 전략",    opt_signal.get('best_strategy',''))
+                st.info(opt_signal.get('market_signal',''))
+                st.markdown("---")
+
+            # TOP 20 옵션 전략 테이블
+            st.markdown("#### 📊 종목별 옵션 전략 추천")
+            opt_cols = ["name","market","rise_prob","implied_vol",
+                        "option_strategy","option_breakeven",
+                        "option_max_profit","option_max_loss","option_detail"]
+            opt_cols = [c for c in opt_cols if c in df.columns]
+            opt_df   = df.head(20)[opt_cols].copy()
+            opt_df   = opt_df.rename(columns={
+                "name":"종목명","market":"시장","rise_prob":"상승확률",
+                "implied_vol":"내재변동성(%)","option_strategy":"추천전략",
+                "option_breakeven":"손익분기점","option_max_profit":"최대수익",
+                "option_max_loss":"최대손실","option_detail":"전략상세",
+            })
+            if "상승확률" in opt_df.columns:
+                opt_df["상승확률"] = opt_df["상승확률"].apply(
+                    lambda v: f"{float(v):.1f}%" if str(v) not in ["-","nan"] else "-")
+            if "내재변동성(%)" in opt_df.columns:
+                opt_df["내재변동성(%)"] = opt_df["내재변동성(%)"].apply(
+                    lambda v: f"{float(v):.1f}%" if str(v) not in ["-","nan"] else "-")
+            st.dataframe(_clean_df(opt_df), width='stretch')
+
+            # 그리스 지표
+            st.markdown("---")
+            st.markdown("#### 🔢 그리스 지표 (ATM 콜옵션 기준)")
+            st.caption("Delta: 주가 1원 변할 때 옵션 가격 변화 | Gamma: Delta 변화율 | Theta: 하루 시간가치 감소 | Vega: IV 1% 변할 때 옵션 가격 변화")
+            greek_cols = ["name","delta","gamma","theta","vega","implied_vol"]
+            greek_cols = [c for c in greek_cols if c in df.columns]
+            greek_df   = df.head(20)[greek_cols].copy()
+            greek_df   = greek_df.rename(columns={
+                "name":"종목명","delta":"Delta","gamma":"Gamma",
+                "theta":"Theta(일)","vega":"Vega","implied_vol":"IV(%)"
+            })
+            st.dataframe(_clean_df(greek_df), width='stretch')
+
+            # 전략별 분류
+            st.markdown("---")
+            st.markdown("#### 🗂️ 전략별 종목 분류")
+            if "option_strategy" in df.columns:
+                strategy_groups = df.groupby("option_strategy")["name"].apply(
+                    lambda x: ", ".join(x.head(5).tolist())
+                ).reset_index()
+                strategy_groups.columns = ["전략","해당종목(TOP5)"]
+                st.dataframe(_clean_df(strategy_groups), width='stretch')
+
+            # 옵션 전략 가이드
+            with st.expander("📚 옵션 전략 가이드"):
+                st.markdown("""
+| 전략 | 언제 사용 | 최대손실 | 최대수익 |
+|------|----------|---------|---------|
+| 📈 롱콜 | 강한 상승 예상 | 프리미엄 | 무제한 |
+| 📉 롱풋 | 강한 하락 예상 | 프리미엄 | 주가×하락률 |
+| ⚡ 스트래들 | 고변동성, 방향 모름 | 프리미엄×2 | 무제한 |
+| 🐂 불스프레드 | 완만한 상승 | 순비용 | 제한적 |
+| 💰 커버드콜 | 횡보+소폭상승 | 하락분-프리미엄 | 프리미엄+상승분 |
+| 🛡️ 프로텍티브풋 | 보유종목 헤지 | 보험료 | 무제한 |
+
+⚠️ 한국 코스피200/코스닥150 종목만 실제 옵션 거래 가능
+                """)
+        else:
+            st.info("사이드바에서 '🎯 옵션 전략 분석' 체크 후 재실행하세요.")
+
 # ════════════════════════════════════════════════════════════════════════════
-# 탭 11: 가이드
+# 탭 12: 가이드
 # ════════════════════════════════════════════════════════════════════════════
-with tab11:
+with tab12:
     st.markdown("""
-### 📖 사용 가이드 v6.0
+### 📖 사용 가이드 v7.0
 
 #### 🆕 v5.6 업그레이드 내용
 
