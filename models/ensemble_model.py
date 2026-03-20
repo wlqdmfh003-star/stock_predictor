@@ -896,6 +896,89 @@ class EnsembleModel:
         except:
             return 20.0
 
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ★ 앙상블 메타러닝 — 최근 적중률 기반 동적 가중치
+    # ══════════════════════════════════════════════════════════════════════════
+    def _load_meta_weights(self):
+        """저장된 메타 가중치 로드"""
+        try:
+            import json, os
+            if os.path.exists(self._meta_file):
+                with open(self._meta_file, "r") as f:
+                    data = json.load(f)
+                self._meta_hits = data.get("hits", self._meta_hits)
+                w = data.get("weights", {})
+                if w:
+                    self.lstm_weight  = w.get("lstm",  self.lstm_weight_base)
+                    self.xgb_weight   = w.get("xgb",   self.xgb_weight_base)
+                    self.lgbm_weight  = w.get("lgbm",  self.lgbm_weight_base)
+                    self.cat_weight   = w.get("cat",   self.cat_weight_base)
+        except Exception:
+            pass
+
+    def update_meta_weights(self, model_preds: dict, actual_up: bool):
+        """
+        예측 결과 업데이트 → 메타 가중치 자동 조정
+        model_preds: {"lstm":확률, "xgb":확률, "lgbm":확률, "cat":확률}
+        actual_up: 실제로 올랐는지 여부
+        """
+        try:
+            for model, pred in model_preds.items():
+                if model not in self._meta_hits:
+                    continue
+                hit = int((pred >= 50) == actual_up)
+                self._meta_hits[model].append(hit)
+                if len(self._meta_hits[model]) > self._meta_window:
+                    self._meta_hits[model].pop(0)
+            self._recalc_meta_weights()
+        except Exception:
+            pass
+
+    def _recalc_meta_weights(self):
+        """최근 적중률 기반 가중치 재계산"""
+        try:
+            import json, os
+            hit_rates = {}
+            for model, hits in self._meta_hits.items():
+                if len(hits) >= 5:
+                    hit_rates[model] = float(np.mean(hits))
+                else:
+                    hit_rates[model] = 0.5
+
+            total = sum(hit_rates.values()) + 1e-9
+            new_w = {k: v/total for k, v in hit_rates.items()}
+
+            alpha = 0.3
+            self.lstm_weight = round(self.lstm_weight_base*(1-alpha) + new_w.get("lstm",0.25)*alpha, 4)
+            self.xgb_weight  = round(self.xgb_weight_base*(1-alpha)  + new_w.get("xgb",0.28)*alpha,  4)
+            self.lgbm_weight = round(self.lgbm_weight_base*(1-alpha) + new_w.get("lgbm",0.25)*alpha, 4)
+            self.cat_weight  = round(self.cat_weight_base*(1-alpha)  + new_w.get("cat",0.22)*alpha,  4)
+
+            os.makedirs(".cache", exist_ok=True)
+            with open(self._meta_file, "w") as f:
+                json.dump({
+                    "hits":    self._meta_hits,
+                    "weights": {
+                        "lstm": self.lstm_weight, "xgb": self.xgb_weight,
+                        "lgbm": self.lgbm_weight, "cat": self.cat_weight,
+                    },
+                    "hit_rates": hit_rates,
+                }, f, indent=2)
+        except Exception:
+            pass
+
+    def get_meta_stats(self) -> dict:
+        """메타러닝 현황"""
+        stats = {}
+        for model, hits in self._meta_hits.items():
+            stats[model] = {
+                "hit_rate": round(float(np.mean(hits))*100, 1) if hits else 0.0,
+                "samples":  len(hits),
+                "weight":   getattr(self, f"{model}_weight", 0.25),
+            }
+        return stats
+
     # ── ★ SHAP 기반 예측 설명 ────────────────────────────────────────────────
     def explain_prediction(self, ohlcv, weekly=None, monthly=None) -> dict:
         """
