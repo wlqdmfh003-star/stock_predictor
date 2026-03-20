@@ -103,39 +103,82 @@ class MacroIndicators:
         return float(np.clip(score, 0, 100))
 
     def apply_to_stocks(self, df: pd.DataFrame, macro: dict) -> pd.DataFrame:
-        """종목별 매크로 영향 반영"""
+        """종목별 매크로 영향 반영 — 섹터별 차별화 강화"""
         df    = df.copy()
         base  = self.calc_score(macro)
 
-        oil_val    = macro.get("WTI유가",  {}).get("value",  70)
-        gold_trend = macro.get("금",       {}).get("trend",  "중립")
-        rate_chg   = macro.get("미국10년금리", {}).get("change", 0)
-        copper_chg = macro.get("구리",     {}).get("change", 0)
+        oil_val    = macro.get("WTI유가",     {}).get("value",  70)
+        gold_trend = macro.get("금",          {}).get("trend",  "중립")
+        gold_chg   = macro.get("금",          {}).get("change", 0)
+        rate_chg   = macro.get("미국10년금리",{}).get("change", 0)
+        rate_val   = macro.get("미국10년금리",{}).get("value",  4.0)
+        copper_chg = macro.get("구리",        {}).get("change", 0)
+        dxy_chg    = macro.get("달러인덱스",  {}).get("change", 0)
+        vix        = macro.get("VIX",         {}).get("value",  20)
+        ewy_chg    = macro.get("한국ETF",     {}).get("change", 0)
 
         macro_scores = []
         for _, row in df.iterrows():
-            name  = str(row.get("name", ""))
-            score = base
+            name   = str(row.get("name", ""))
+            sector = str(row.get("sector", "기타"))
+            score  = base
+
+            # ★ 섹터별 차별화 (점수가 다양하게 나오도록)
+            # 반도체: 달러 강세 + 미국 증시 영향
+            if sector == "반도체" or any(kw in name for kw in ["삼성전자","SK하이닉스","DB하이텍"]):
+                score += np.clip(ewy_chg * 3, -10, 12)
+                score += np.clip(-dxy_chg * 2, -8, 8)
+
+            # 2차전지: 구리/원자재 영향
+            elif sector == "2차전지" or any(kw in name for kw in ["LG에너지","에코프로","포스코퓨처엠"]):
+                score += np.clip(copper_chg * 3, -10, 12)
+                score += np.clip(-rate_chg * 15, -10, 8)
 
             # 에너지주: 유가 수혜
-            if any(kw in name for kw in ["S-Oil","SK이노베이션","GS","한국가스","E1"]):
-                score += np.clip((oil_val - 70) * 0.3, -10, 15)
+            elif sector == "에너지" or any(kw in name for kw in ["S-Oil","SK이노베이션","GS","한국가스","E1"]):
+                score += np.clip((oil_val - 70) * 0.4, -12, 18)
 
             # 금융주: 금리 상승 수혜
-            if any(kw in name for kw in ["KB금융","신한","하나금융","우리금융","기업은행"]):
-                score += np.clip(rate_chg * 20, -8, 12)
+            elif sector == "금융" or any(kw in name for kw in ["KB금융","신한","하나금융","우리금융","기업은행"]):
+                score += np.clip(rate_chg * 25, -10, 15)
+                if rate_val > 4.5: score += 5
 
-            # 금 관련주: 금 상승 수혜
-            if any(kw in name for kw in ["고려아연","풍산","한국금","영풍"]):
-                if gold_trend == "상승": score += 10
+            # 철강/소재: 구리 + 경기
+            elif sector == "철강/소재" or any(kw in name for kw in ["POSCO","현대제철","고려아연","풍산"]):
+                score += np.clip(copper_chg * 2.5, -10, 12)
+                if gold_trend == "상승": score += 8
 
-            # 철강/소재: 구리 상승 = 경기호황 수혜
-            if any(kw in name for kw in ["POSCO","현대제철","고려아연","풍산"]):
-                score += np.clip(copper_chg * 2, -8, 10)
+            # 바이오: VIX 영향 (변동성 낮을수록 유리)
+            elif sector == "바이오/제약":
+                if vix < 15:   score += 10
+                elif vix > 25: score -= 8
+
+            # 방산: 지정학적 리스크 (VIX 상승 시 수혜)
+            elif sector == "방산":
+                if vix > 25: score += 12
+                elif vix > 20: score += 6
+
+            # 자동차: 달러 강세 수혜 (수출)
+            elif sector == "자동차/부품" or any(kw in name for kw in ["현대차","기아","현대모비스"]):
+                score += np.clip(dxy_chg * 3, -8, 12)
 
             # 내수주: 달러 영향 적음 (방어적)
-            if any(kw in name for kw in ["롯데","신세계","이마트","CJ","하이트"]):
-                score = (score + 50) / 2   # 중립 방향으로
+            elif sector in ["유통/소비","건설/부동산"] or                  any(kw in name for kw in ["롯데","신세계","이마트","CJ","하이트"]):
+                score = (score * 0.6 + 50 * 0.4)  # 중립 방향으로
+
+            # IT/플랫폼: 금리 민감
+            elif sector == "IT/플랫폼":
+                score += np.clip(-rate_chg * 20, -12, 10)
+
+            # 조선: 달러 강세 + 경기
+            elif sector == "조선":
+                score += np.clip(dxy_chg * 2, -6, 10)
+                score += np.clip(copper_chg * 1.5, -6, 8)
+
+            # 화학: 유가 + 달러
+            elif sector == "화학":
+                score += np.clip((oil_val - 70) * 0.2, -8, 10)
+                score += np.clip(-dxy_chg * 1.5, -6, 8)
 
             macro_scores.append(float(np.clip(score, 0, 100)))
 

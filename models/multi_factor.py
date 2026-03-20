@@ -34,9 +34,16 @@ class MultiFactorScorer:
         tw = sum(w.values()) or 1.0
 
         def norm(col):
-            s = df[col].astype(float)
-            mn, mx = s.min(), s.max()
-            return (s-mn)/(mx-mn+1e-9)*100 if mx-mn>1e-9 else pd.Series(50.0,index=df.index)
+            s  = df[col].astype(float)
+            mn = s.min()
+            mx = s.max()
+            if mx - mn > 1e-9:
+                return (s - mn) / (mx - mn) * 100
+            else:
+                # ★ min==max (모두 같은 값) → 원래 값 그대로 사용 (50점 고정 방지)
+                val = float(s.iloc[0]) if len(s) > 0 else 50.0
+                # 0~100 범위면 그대로, 아니면 클리핑
+                return pd.Series(float(np.clip(val, 0, 100)), index=df.index)
 
         df["f_lstm"]        = norm("lstm_score")
         df["f_ensemble"]    = norm("ensemble_score")

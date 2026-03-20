@@ -22,7 +22,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 st.set_page_config(
-    page_title="📈 내일 주식 상승 예측 v5.3",
+    page_title="📈 내일 주식 상승 예측 v7.0",
     page_icon="📈", layout="wide",
     initial_sidebar_state="expanded"
 )

@@ -231,7 +231,12 @@ class KISApi:
         foreign_net = sum(int(i.get("frgn_ntby_qty",0)  or 0) for i in output)
         inst_amt    = sum(int(i.get("orgn_ntby_tr_pbmn",0) or 0) for i in output)
         frgn_amt    = sum(int(i.get("frgn_ntby_tr_pbmn",0) or 0) for i in output)
-        inst_score  = float(np.clip(50+(inst_amt+frgn_amt*0.5)/1e7, 0, 100))
+        # ★ 기관점수 = 순매수 + 호가압력 + 체결강도 종합
+        inst_score_raw = float(np.clip(50+(inst_amt+frgn_amt*0.5)/1e7, 0, 100))
+        # 호가/체결강도로 기관점수 보완 (장외시간에도 차별화)
+        ob_bonus   = float(np.clip((ob_score - 50) * 0.3, -15, 15))
+        ts_bonus   = float(np.clip((ts_score - 100) / 100 * 10, -10, 10))
+        inst_score = float(np.clip(inst_score_raw + ob_bonus + ts_bonus, 0, 100))
         return {"inst_net":inst_net,"foreign_net":foreign_net,
                 "inst_amt":inst_amt,"frgn_amt":frgn_amt,"inst_score":inst_score}
 
