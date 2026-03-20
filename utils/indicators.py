@@ -20,14 +20,13 @@ class TechnicalIndicators:
         results = []
         for _, row in df.iterrows():
             ohlcv = row.get("ohlcv")
+            # ★ Series.update()는 기존 키만 업데이트 → dict 병합 방식으로 수정
+            row_dict = row.to_dict()
             if ohlcv is None or len(ohlcv) < 30:
-                r = row.copy()
-                r.update(self._default_indicators())
-                results.append(r)
-                continue
-            r = row.copy()
-            r.update(self._calc_row(ohlcv, row))
-            results.append(r)
+                row_dict.update(self._default_indicators())
+            else:
+                row_dict.update(self._calc_row(ohlcv, row))
+            results.append(row_dict)
         return pd.DataFrame(results).reset_index(drop=True)
 
     # ── 기존 지표 ──────────────────────────────────────────────────
