@@ -2,10 +2,10 @@ name: 주식 예측 자동 실행
 
 on:
   schedule:
-    - cron: '30 21 * * 1-5'  # 한국시간 06:30
-    - cron: '0 3 * * 1-5'    # 한국시간 12:00
-    - cron: '0 8 * * 1-5'    # 한국시간 17:00
-    - cron: '30 14 * * 1-5'  # 한국시간 23:30
+    - cron: '30 21 * * 1-5'  # 한국시간 06:30 (월~금)
+    - cron: '0 3 * * 1-5'    # 한국시간 12:00 (월~금)
+    - cron: '0 8 * * 1-5'    # 한국시간 17:00 (월~금)
+    - cron: '30 14 * * 1-5'  # 한국시간 23:30 (월~금)
   workflow_dispatch:          # 수동 실행 가능
 
 jobs:
@@ -36,17 +36,24 @@ jobs:
         NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
         NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
         DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        TRANSFORMERS_VERBOSITY: error
+        HF_HUB_DISABLE_PROGRESS_BARS: "1"
       run: |
         python -c "
         import os, sys
         sys.path.insert(0, '.')
 
-        kis_key    = os.environ.get('KIS_APP_KEY', '')
-        kis_secret = os.environ.get('KIS_APP_SECRET', '')
-        kis_acct   = os.environ.get('KIS_ACCOUNT', '')
-        naver_id   = os.environ.get('NAVER_CLIENT_ID', '')
-        naver_sec  = os.environ.get('NAVER_CLIENT_SECRET', '')
-        dart_key   = os.environ.get('DART_API_KEY', '')
+        kis_key      = os.environ.get('KIS_APP_KEY', '')
+        kis_secret   = os.environ.get('KIS_APP_SECRET', '')
+        kis_acct     = os.environ.get('KIS_ACCOUNT', '')
+        naver_id     = os.environ.get('NAVER_CLIENT_ID', '')
+        naver_sec    = os.environ.get('NAVER_CLIENT_SECRET', '')
+        dart_key     = os.environ.get('DART_API_KEY', '')
+        tg_token     = os.environ.get('TELEGRAM_TOKEN', '')
+        tg_chat_id   = os.environ.get('TELEGRAM_CHAT_ID', '')
 
         print('자동 분석 시작...')
 
@@ -88,8 +95,52 @@ jobs:
         tracker = LearningTracker()
         tracker.update_results(df)
         saved = tracker.save_predictions(df)
-        stats = tracker.get_stats()
+        stats  = tracker.get_stats()
 
         print(f'분석 완료! 저장: {saved}건')
         print(f'누적: {stats[\"total\"]}건 / 적중률: {stats[\"hit_rate\"]}%')
+
+        # ── 텔레그램 TOP5 알림 ─────────────────────────────────
+        if tg_token and tg_chat_id:
+            import requests as req
+            from datetime import datetime
+
+            today   = datetime.now().strftime('%Y-%m-%d')
+            top5    = df.head(5)
+            lines   = [f'📈 오늘의 TOP5 예측 종목 ({today})\n']
+
+            for i, (_, row) in enumerate(top5.iterrows(), 1):
+                name   = row.get('name', '')
+                prob   = row.get('rise_prob', 0)
+                price  = int(row.get('current_price', 0))
+                target = int(row.get('target_price', 0))
+                stop   = int(row.get('stop_price', 0))
+                roe    = row.get('roe', 0)
+                theme  = row.get('theme_tag', '')
+
+                line = (
+                    f'{i}. {name}\n'
+                    f'   상승확률: {prob:.1f}%\n'
+                    f'   현재가: {price:,}원\n'
+                    f'   목표가: {target:,}원\n'
+                    f'   손절가: {stop:,}원\n'
+                )
+                if roe and float(roe) != 0:
+                    line += f'   ROE: {float(roe):.1f}%\n'
+                if theme:
+                    line += f'   테마: {theme}\n'
+                lines.append(line)
+
+            lines.append(f'\n✅ 자기학습 누적: {stats[\"total\"]}건')
+            lines.append(f'🎯 적중률: {stats[\"hit_rate\"]}%')
+            lines.append(f'💰 평균수익: {stats[\"avg_return\"]:+.2f}%')
+
+            msg = '\n'.join(lines)
+            url = f'https://api.telegram.org/bot{tg_token}/sendMessage'
+            req.post(url, json={
+                'chat_id': tg_chat_id,
+                'text':    msg,
+                'parse_mode': 'HTML'
+            }, timeout=10)
+            print('텔레그램 알림 전송 완료!')
         "
