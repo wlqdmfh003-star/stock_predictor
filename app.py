@@ -380,6 +380,10 @@ if analyze_btn:
             "candle_score":"캔들","macro_score":"매크로","sector_score":"섹터점수",
             "candle_pattern":"캔들패턴","news_summary":"뉴스요약","sector":"섹터",
             "corr_flag":"상관중복","calendar_note":"시간대효과",
+            "short_signal":"공매도신호","implied_vol":"내재변동성(%)",
+            "option_strategy":"옵션전략","sector_rotation":"섹터로테이션",
+            "earnings_note":"실적일정","stoch_k":"스토캐스틱K",
+            "cci":"CCI","mfi":"MFI","vwap_deviation":"VWAP이탈(%)",
         }
 
         df_disp=df.drop(columns=["ohlcv","ohlcv_weekly","ohlcv_monthly"],errors="ignore").copy()
@@ -482,7 +486,7 @@ if analyze_btn:
         st.download_button("📥 결과 CSV 다운로드",
             df.drop(columns=["ohlcv","ohlcv_weekly","ohlcv_monthly"],errors="ignore")\
               .to_csv(index=False,encoding="utf-8-sig"),
-            file_name="stock_prediction_v53.csv",mime="text/csv")
+            file_name="stock_prediction_v70.csv",mime="text/csv")
 
     # ════════════════════════════════════════════════════════════════════════
     # 탭 2: 미국/매크로
@@ -500,9 +504,25 @@ if analyze_btn:
                                 f'<div style="color:#94a3b8;font-size:.75rem">{val:,.2f}</div>'
                                 f'</div>',unsafe_allow_html=True)
         if macro_data:
-            st.markdown("#### 매크로 지표"); mi2=MacroIndicators(); sm=mi2.get_summary(macro_data)
-            st.markdown(f"**매크로 환경:** {sm['env']} (점수: {sm['score']})")
-            cols3=st.columns(3)
+            mi2 = MacroIndicators()
+            sm  = mi2.get_summary(macro_data)
+            # ★ 공포탐욕 지수
+            fg  = mi2.get_fear_greed(macro_data)
+            st.markdown("---")
+            st.markdown("#### 😱 공포탐욕 지수 (Fear & Greed Index)")
+            fg_cols = st.columns(5)
+            fg_color = {"극단적탐욕":"#ef4444","탐욕":"#10b981","중립":"#f59e0b",
+                        "공포":"#f97316","극단적공포":"#7f1d1d"}.get(fg["phase"],"#94a3b8")
+            with fg_cols[0]: st.metric("공포탐욕 점수", f"{fg['score']:.0f}점")
+            with fg_cols[1]: st.metric("시장 국면",     f"{fg['icon']} {fg['phase']}")
+            with fg_cols[2]: st.metric("VIX",           f"{fg['vix']:.1f}")
+            with fg_cols[3]: st.metric("매크로 환경",   sm["env"])
+            with fg_cols[4]: st.metric("매크로 점수",   f"{sm['score']:.1f}점")
+            # 게이지 표시
+            st.progress(min(int(fg["score"]), 100))
+            st.caption(f"{fg['description']}")
+            st.markdown("---")
+            st.markdown("#### 매크로 지표"); cols3=st.columns(3)
             for i,name in enumerate(["미국10년금리","달러인덱스","WTI유가","금","구리","한국ETF"]):
                 d=macro_data.get(name,{}); chg=d.get("change",0); val=d.get("value",0)
                 with cols3[i%3]:
@@ -516,10 +536,37 @@ if analyze_btn:
     # 탭 3: 섹터
     # ════════════════════════════════════════════════════════════════════════
     with tab3:
-        st.markdown("### 🏭 섹터 분석")
+        st.markdown("### 🏭 섹터 분석 + 🔄 섹터 로테이션 전략")
         if use_sector and "sector" in df.columns:
-            sdf=SectorAnalysis().get_sector_summary(df)
+            sa_inst = SectorAnalysis()
+            sdf     = sa_inst.get_sector_summary(df)
+            # ★ 섹터 로테이션 전략
+            rotation = sa_inst.get_rotation_strategy(df)
+            if rotation.get("top3_sectors"):
+                st.markdown("#### 🔄 섹터 로테이션 전략")
+                r_col1, r_col2 = st.columns(2)
+                with r_col1:
+                    st.success(f"🚀 강세 섹터 TOP3: {' > '.join(rotation['top3_sectors'])}")
+                with r_col2:
+                    st.error(f"📉 약세 섹터: {' > '.join(rotation['bottom3_sectors'])}")
+                st.caption(rotation.get("summary",""))
+                # 섹터 강도 차트
+                ss = rotation.get("sector_strength",{})
+                if ss:
+                    sorted_ss = sorted(ss.items(), key=lambda x:x[1], reverse=True)
+                    fig_rot = go.Figure(go.Bar(
+                        x=[s[0] for s in sorted_ss],
+                        y=[s[1] for s in sorted_ss],
+                        marker_color=["#10b981" if v>0 else "#ef4444"
+                                      for _,v in sorted_ss]))
+                    fig_rot.update_layout(
+                        title="섹터 강도 (양수=강세/음수=약세)",
+                        paper_bgcolor="#0f0f23",plot_bgcolor="#0f0f23",
+                        font=dict(color="white"),height=320)
+                    st.plotly_chart(fig_rot, width='stretch')
+                st.markdown("---")
             if not sdf.empty:
+                st.markdown("#### 섹터별 상세 현황")
                 st.dataframe(_clean_df(sdf),width='stretch')
                 fig2=go.Figure(go.Bar(x=sdf["섹터"].tolist(),
                     y=pd.to_numeric(sdf["평균상승확률"],errors="coerce").fillna(0).tolist(),
@@ -629,10 +676,16 @@ if analyze_btn:
     # ════════════════════════════════════════════════════════════════════════
     with tab7:
         period_map=Backtester.PERIOD_MAP; lookback=period_map.get(bt_period,250)
-        st.markdown(f"### 📋 백테스트 v5.4 — {bt_period} / TOP {bt_top_k}")
+        st.markdown(f"### 📋 백테스트 v7.0 — {bt_period} / TOP {bt_top_k}")
         if use_backtest:
-            bt_mode = st.radio("백테스트 방식",["일반 백테스트","★ 워크포워드 백테스트"],horizontal=True)
-            bter = Backtester(lookback_days=lookback, top_k=bt_top_k)
+            bt_col1, bt_col2 = st.columns(2)
+            with bt_col1:
+                bt_mode = st.radio("백테스트 방식",["일반 백테스트","★ 워크포워드 백테스트"],horizontal=True)
+            with bt_col2:
+                use_atr_bt = st.checkbox("★ ATR 손절/목표가 적용 (실전 전략)", value=True)
+            bter = Backtester(lookback_days=lookback, top_k=bt_top_k, use_atr=use_atr_bt)
+            if use_atr_bt:
+                st.caption("🎯 ATR 전략: 매수가 - ATR×2 손절 / 매수가 + ATR×3 목표가 적용")
 
             if bt_mode == "일반 백테스트":
                 with st.spinner(f"백테스트 실행 중 ({bt_period})..."):
@@ -716,7 +769,7 @@ if analyze_btn:
     # 탭 8: 자기학습 v5.4
     # ════════════════════════════════════════════════════════════════════════
     with tab8:
-        st.markdown("### 🧬 자기학습 v5.4 — 강화학습(Q-Learning) + 베이지안 최적화")
+        st.markdown("### 🧬 자기학습 v7.0 — DQN 강화학습 + 베이지안 + 메타러닝")
         # 기본 현황
         c1,c2,c3,c4=st.columns(4)
         with c1: st.metric("총 예측 저장",  f"{ns2['total']}건")
@@ -738,6 +791,23 @@ if analyze_btn:
                 st.caption("ε=0.3→0.05 감소 | 에피소드 쌓일수록 최적 행동 학습")
             else:
                 st.info("강화학습 데이터 누적 중... (결과 업데이트 시 자동 학습)")
+            # ★ 메타러닝 현황 (항상 표시)
+            try:
+                _em_meta = EnsembleModel()
+                meta_st  = _em_meta.get_meta_stats()
+                st.markdown("---")
+                st.markdown("#### 🤖 앙상블 메타러닝 현황")
+                st.caption("최근 20번 예측 적중률 기반으로 LSTM/XGB/LGB/CatBoost 가중치 자동 조정")
+                meta_cols = st.columns(4)
+                for i, (model, mstat) in enumerate(meta_st.items()):
+                    with meta_cols[i]:
+                        st.metric(
+                            f"{model.upper()} 가중치",
+                            f"{mstat['weight']*100:.1f}%",
+                            f"적중률 {mstat['hit_rate']}% ({mstat['samples']}건)"
+                        )
+            except Exception:
+                pass
         except Exception as _e:
             st.caption(f"강화학습 현황 조회 오류: {_e}")
 
