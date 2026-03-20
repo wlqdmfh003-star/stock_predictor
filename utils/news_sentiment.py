@@ -26,7 +26,7 @@ THEME_KEYWORDS = {
 
 class NewsSentiment:
     """
-    v5.5 뉴스 감성 분석 + 요약 고도화
+    v6.1 뉴스 감성 분석 + 요약 고도화 + 캐싱
     ★ KoBERT 감성 분석 (금융 특화)
     ★ 핵심 키워드 자동 추출 (상승/하락 근거 명시)
     ★ 테마주 자동 감지 (AI반도체/2차전지/방산 등)
@@ -75,6 +75,8 @@ class NewsSentiment:
         self.client_secret = client_secret
         self._bert_pipe    = None
         self._bert_loaded  = False
+        # ★ 당일 뉴스 캐시 (같은 종목 중복 수집 방지)
+        self._cache        = {}
         self._try_load_bert()
 
     def _try_load_bert(self):
@@ -112,11 +114,21 @@ class NewsSentiment:
             if not name or name in ("-", "—"):
                 name = code
 
+            # ★ 캐시 확인 (당일 같은 종목 중복 수집 방지)
+            cache_key = code or name
+            if cache_key in self._cache:
+                cached = self._cache[cache_key]
+                scores.append(cached["score"])
+                summaries.append(cached["summary"])
+                themes.append(cached["theme"])
+                continue
+
             articles = self._fetch_news(name)
             if not articles:
                 scores.append(50.0)
                 summaries.append("뉴스없음")
                 themes.append("")
+                self._cache[cache_key] = {"score":50.0,"summary":"뉴스없음","theme":""}
                 continue
 
             # 감성 점수
@@ -130,6 +142,11 @@ class NewsSentiment:
 
             # ★ 테마주 감지
             theme = self._detect_theme(articles)
+
+            # ★ 캐시 저장
+            self._cache[cache_key] = {
+                "score": score, "summary": rich_summary, "theme": theme
+            }
 
             scores.append(score)
             summaries.append(rich_summary)
