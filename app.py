@@ -22,7 +22,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 st.set_page_config(
-    page_title="📈 내일 주식 상승 예측 v7.0",
+    page_title="📈 내일 주식 상승 예측 v5.3",
     page_icon="📈", layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -680,7 +680,9 @@ if analyze_btn:
         if use_backtest:
             bt_col1, bt_col2 = st.columns(2)
             with bt_col1:
-                bt_mode = st.radio("백테스트 방식",["일반 백테스트","★ 워크포워드 백테스트"],horizontal=True)
+                bt_mode = st.radio("백테스트 방식",
+                    ["일반 백테스트","★ 워크포워드 백테스트","🎲 몬테카를로 시뮬레이션"],
+                    horizontal=True)
             with bt_col2:
                 use_atr_bt = st.checkbox("★ ATR 손절/목표가 적용 (실전 전략)", value=True)
             bter = Backtester(lookback_days=lookback, top_k=bt_top_k, use_atr=use_atr_bt)
@@ -724,7 +726,7 @@ if analyze_btn:
                     legend=dict(bgcolor="rgba(0,0,0,0)"))
                 st.plotly_chart(fig_bt,width='stretch')
 
-            else:  # 워크포워드 백테스트
+            elif bt_mode == "★ 워크포워드 백테스트":  # 워크포워드 백테스트
                 st.info("훈련창 120일 → 검증창 30일 슬라이딩 | IS vs OOS 성과 비교")
                 with st.spinner("워크포워드 백테스트 실행 중... (수십 초 소요)"):
                     wf_res = bter.run_walkforward(df)
@@ -762,6 +764,72 @@ if analyze_btn:
                     with st.expander("윈도우별 IS/OOS 수익 상세"):
                         st.dataframe(_clean_df(wlog),width='stretch')
                 st.caption("과적합비율 > 0.7 + OOS적중률 > 52% = 실전 적용 추천")
+
+            elif bt_mode == "🎲 몬테카를로 시뮬레이션":
+                mc_col1, mc_col2 = st.columns(2)
+                with mc_col1:
+                    mc_n = st.slider("시뮬레이션 횟수", 100, 2000, 1000, 100)
+                with mc_col2:
+                    mc_days = st.slider("시뮬레이션 기간(일)", 20, 120, 60, 10)
+                st.info(f"과거 수익률을 무작위로 섞어 {mc_n}번 시뮬레이션 → 미래 수익 범위 예측")
+                with st.spinner(f"🎲 몬테카를로 시뮬레이션 {mc_n}회 실행 중..."):
+                    mc_res = bter.run_montecarlo(df, n_simulations=mc_n, n_days=mc_days)
+                st.markdown(f"#### 판정: {mc_res.get('verdict','')}")
+                # 핵심 지표
+                mc1,mc2,mc3,mc4,mc5,mc6 = st.columns(6)
+                with mc1: st.metric("중간 수익(50%)",  f"{mc_res['p50']:+.1f}%")
+                with mc2: st.metric("낙관 수익(95%)",  f"{mc_res['p95']:+.1f}%")
+                with mc3: st.metric("비관 수익(5%)",   f"{mc_res['p5']:+.1f}%")
+                with mc4: st.metric("승률",            f"{mc_res['win_rate']:.1f}%")
+                with mc5: st.metric("평균 MDD",        f"{mc_res['avg_mdd']:.1f}%")
+                with mc6: st.metric("파산확률(MDD>30%)",f"{mc_res['bankruptcy_prob']:.1f}%")
+                st.markdown("---")
+                # 시나리오 차트
+                fig_mc = go.Figure()
+                days_x = list(range(mc_days))
+                if mc_res.get("worst_path"):
+                    fig_mc.add_trace(go.Scatter(
+                        x=days_x, y=mc_res["worst_path"],
+                        mode="lines", name="비관(5%)",
+                        line=dict(color="#ef4444", width=2, dash="dash")))
+                if mc_res.get("median_path"):
+                    fig_mc.add_trace(go.Scatter(
+                        x=days_x, y=mc_res["median_path"],
+                        mode="lines", name="중간(50%)",
+                        line=dict(color="#f59e0b", width=3)))
+                if mc_res.get("best_path"):
+                    fig_mc.add_trace(go.Scatter(
+                        x=days_x, y=mc_res["best_path"],
+                        mode="lines", name="낙관(95%)",
+                        line=dict(color="#10b981", width=2, dash="dash")))
+                fig_mc.add_hline(y=0, line_dash="dot",
+                                 line_color="white", opacity=0.3)
+                fig_mc.update_layout(
+                    title=f"몬테카를로 {mc_n}회 시뮬레이션 — {mc_days}일 수익 시나리오",
+                    xaxis_title="거래일", yaxis_title="누적수익(%)",
+                    paper_bgcolor="#0f0f23", plot_bgcolor="#0f0f23",
+                    font=dict(color="white"), height=420,
+                    legend=dict(bgcolor="rgba(0,0,0,0)"))
+                st.plotly_chart(fig_mc, width='stretch')
+                # 수익 분포 히스토그램
+                st.markdown("#### 수익률 분포")
+                mc_info = (
+                    f"VaR(5%): {mc_res['var_5']:+.1f}% | "
+                    f"평균: {mc_res['mean_return']:+.1f}% | "
+                    f"표준편차: {mc_res['std_return']:.1f}% | "
+                    f"25%~75%: {mc_res['p25']:+.1f}% ~ {mc_res['p75']:+.1f}%"
+                )
+                st.caption(mc_info)
+                with st.expander("📊 몬테카를로 해석 가이드"):
+                    st.markdown("""
+| 지표 | 의미 |
+|------|------|
+| 중간수익(50%) | 절반 확률로 이 수익 이상 |
+| 낙관수익(95%) | 상위 5% 시나리오 |
+| 비관수익(5%) | 하위 5% 최악 시나리오 |
+| VaR(5%) | 5% 확률로 이것보다 더 손실 |
+| 파산확률 | MDD 30% 초과 확률 |
+                    """)
         else:
             st.info("사이드바에서 '📊 백테스트' 체크 후 재실행하세요.")
 

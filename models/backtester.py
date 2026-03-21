@@ -6,12 +6,15 @@ warnings.filterwarnings('ignore')
 
 class Backtester:
     """
-    백테스트 v6.1
+    백테스트 v7.1
     ★ ATR 손절/목표가 적용 실전 백테스트
-    ★ 단순 보유 vs ATR 전략 비교
     ★ 워크포워드 백테스트 (IS/OOS)
-    ★ 3전략: TOP K / 동일가중 / 시장평균
-    ★ 실전 지표: 총수익/승률/샤프/소르티노/칼마/MDD/손익비
+    ★ 몬테카를로 시뮬레이션 (1000회)
+       - 수익률 신뢰구간 (5th~95th percentile)
+       - 최악/최선/중간 시나리오
+       - 파산 확률 (MDD -50% 초과 비율)
+    ★ 3전략 비교: TOP K / 동일가중 / 시장평균
+    ★ 실전 지표: 샤프/소르티노/칼마/MDD/손익비
     """
 
     PERIOD_MAP = {
@@ -31,16 +34,15 @@ class Backtester:
         self.cost            = commission + tax
         self.wf_train        = wf_train
         self.wf_test         = wf_test
-        self.use_atr         = use_atr          # ATR 전략 사용 여부
-        self.atr_stop_mult   = atr_stop_mult    # 손절 = 매수가 - ATR × 2.0
-        self.atr_target_mult = atr_target_mult  # 목표 = 매수가 + ATR × 3.0
+        self.use_atr         = use_atr
+        self.atr_stop_mult   = atr_stop_mult
+        self.atr_target_mult = atr_target_mult
 
     # ── 일반 백테스트 ─────────────────────────────────────────────────────────
     def run(self, df: pd.DataFrame) -> dict:
         if df is None or len(df) == 0:
             return self._empty_result()
 
-        # 실제 데이터 길이에 맞게 lookback 자동 조정
         lens = [len(row.get("ohlcv")) for _, row in df.iterrows()
                 if row.get("ohlcv") is not None]
         if not lens:
@@ -55,25 +57,20 @@ class Backtester:
             ohlcv = row.get("ohlcv")
             if ohlcv is None or len(ohlcv) < auto_lb + 2:
                 continue
-            # ★ ATR 전략 vs 단순 보유
-            if self.use_atr:
-                res = self._bt_atr(ohlcv, str(row.get("name","")), auto_lb)
-            else:
-                res = self._bt_single(ohlcv, str(row.get("name","")), auto_lb)
+            res = self._bt_atr(ohlcv, str(row.get("name","")), auto_lb) \
+                  if self.use_atr else \
+                  self._bt_single(ohlcv, str(row.get("name","")), auto_lb)
             top_rets.extend(res["rets"])
             top_log.append(res["summary"])
 
-        eq_lists = []
+        eq_lists, mkt_lists = [], []
         for _, row in df.head(20).iterrows():
             ohlcv = row.get("ohlcv")
             if ohlcv is None or len(ohlcv) < auto_lb + 2:
                 continue
-            if self.use_atr:
-                eq_lists.append(self._bt_atr(ohlcv, "", auto_lb)["rets"])
-            else:
-                eq_lists.append(self._bt_single(ohlcv, "", auto_lb)["rets"])
-
-        mkt_lists = []
+            res = self._bt_atr(ohlcv, "", auto_lb) if self.use_atr \
+                  else self._bt_single(ohlcv, "", auto_lb)
+            eq_lists.append(res["rets"])
         for _, row in df.iterrows():
             ohlcv = row.get("ohlcv")
             if ohlcv is None or len(ohlcv) < auto_lb + 2:
@@ -90,14 +87,121 @@ class Backtester:
             "market": self._calc_stats(self._avg(mkt_lists), []),
         }
 
-    # ── ★ ATR 손절/목표가 적용 백테스트 ─────────────────────────────────────
+    # ── ★ 몬테카를로 시뮬레이션 ──────────────────────────────────────────────
+    def run_montecarlo(self, df: pd.DataFrame,
+                       n_simulations: int = 1000,
+                       n_days: int = 60) -> dict:
+        """
+        몬테카를로 시뮬레이션
+        - 과거 수익률을 무작위로 섞어서 n_simulations번 시뮬레이션
+        - 수익률 신뢰구간 / 최악·최선·중간 시나리오
+        - 파산 확률 (MDD -30% 초과)
+        - VaR (Value at Risk) 5%
+        """
+        if df is None or len(df) == 0:
+            return self._empty_mc()
+
+        # TOP K 종목 수익률 수집
+        all_rets = []
+        for _, row in df.head(self.top_k).iterrows():
+            ohlcv = row.get("ohlcv")
+            if ohlcv is None or len(ohlcv) < 30:
+                continue
+            try:
+                c    = ohlcv["close"].astype(float).values
+                rets = ((c[1:]/c[:-1]) - 1) * 100
+                all_rets.extend(rets.tolist())
+            except:
+                continue
+
+        if len(all_rets) < 20:
+            return self._empty_mc()
+
+        rets_arr = np.array(all_rets)
+        # 비용 반영
+        rets_arr -= self.cost * 100
+
+        # 시뮬레이션 실행
+        final_returns   = []
+        max_drawdowns   = []
+        equity_paths    = []
+        bankruptcy_count = 0
+
+        np.random.seed(42)
+        for _ in range(n_simulations):
+            # 무작위 샘플링 (복원추출)
+            sampled = np.random.choice(rets_arr, size=n_days, replace=True)
+            cum     = np.cumprod(1 + sampled/100)
+            eq      = (cum - 1) * 100
+
+            # MDD 계산
+            peak = np.maximum.accumulate(cum)
+            dd   = (cum - peak) / (peak + 1e-9) * 100
+            mdd  = float(dd.min())
+
+            final_returns.append(float(eq[-1]))
+            max_drawdowns.append(mdd)
+            equity_paths.append(eq.tolist())
+
+            if mdd < -30:
+                bankruptcy_count += 1
+
+        final_arr = np.array(final_returns)
+        mdd_arr   = np.array(max_drawdowns)
+
+        # 신뢰구간
+        p5  = float(np.percentile(final_arr, 5))
+        p25 = float(np.percentile(final_arr, 25))
+        p50 = float(np.percentile(final_arr, 50))
+        p75 = float(np.percentile(final_arr, 75))
+        p95 = float(np.percentile(final_arr, 95))
+
+        # VaR (5%) - 최악 5% 손실
+        var_5 = float(np.percentile(final_arr, 5))
+
+        # 대표 경로 3개
+        sorted_idx = np.argsort(final_arr)
+        worst_path  = equity_paths[sorted_idx[int(n_simulations*0.05)]]
+        median_path = equity_paths[sorted_idx[n_simulations//2]]
+        best_path   = equity_paths[sorted_idx[int(n_simulations*0.95)]]
+
+        # 승률 (양수 수익 비율)
+        win_rate = float((final_arr > 0).mean() * 100)
+
+        return {
+            "n_simulations":    n_simulations,
+            "n_days":           n_days,
+            "mean_return":      round(float(final_arr.mean()), 2),
+            "std_return":       round(float(final_arr.std()), 2),
+            "p5":               round(p5,  2),
+            "p25":              round(p25, 2),
+            "p50":              round(p50, 2),
+            "p75":              round(p75, 2),
+            "p95":              round(p95, 2),
+            "var_5":            round(var_5, 2),
+            "win_rate":         round(win_rate, 1),
+            "avg_mdd":          round(float(mdd_arr.mean()), 2),
+            "worst_mdd":        round(float(mdd_arr.min()), 2),
+            "bankruptcy_prob":  round(bankruptcy_count/n_simulations*100, 1),
+            "worst_path":       worst_path,
+            "median_path":      median_path,
+            "best_path":        best_path,
+            "verdict":          self._mc_verdict(p50, p5, win_rate,
+                                                 bankruptcy_count/n_simulations*100),
+        }
+
+    def _mc_verdict(self, p50, p5, win_rate, bankruptcy_prob) -> str:
+        if p50 > 5 and p5 > -5 and win_rate > 60 and bankruptcy_prob < 5:
+            return "✅ 우수 — 기대수익 양호, 리스크 낮음"
+        elif p50 > 0 and win_rate > 50:
+            return "🟡 보통 — 수익 가능하나 변동성 주의"
+        elif p50 < 0 or bankruptcy_prob > 20:
+            return "🔴 위험 — 손실 확률 높음, 전략 재검토"
+        else:
+            return "🟠 주의 — 조건부 적용 권장"
+
+    # ── ATR 실전 백테스트 ─────────────────────────────────────────────────────
     def _bt_atr(self, ohlcv, name: str, lookback: int) -> dict:
-        """
-        ATR 기반 실전 백테스트
-        - 매수 후 목표가 도달 → 수익 실현
-        - 매수 후 손절가 도달 → 손실 확정
-        - 둘 다 안 되면 lookback 기간 후 청산
-        """
         try:
             c = ohlcv["close"].astype(float).values
             h = ohlcv["high"].astype(float).values  if "high" in ohlcv.columns else c.copy()
@@ -110,7 +214,6 @@ class Backtester:
             h = h[-(lookback+1):]
             l = l[-(lookback+1):]
 
-            # ATR 계산 (14일)
             atr_period = min(14, len(c)-1)
             tr_arr = np.array([
                 max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1]))
@@ -121,46 +224,29 @@ class Backtester:
             rets = []
             i = 0
             while i < len(c) - 1:
-                entry   = float(c[i])
-                stop    = entry - atr * self.atr_stop_mult
-                target  = entry + atr * self.atr_target_mult
-                exited  = False
-
-                # 다음 봉부터 손절/목표가 체크
-                for j in range(i+1, min(i+21, len(c))):  # 최대 20일 보유
+                entry  = float(c[i])
+                stop   = entry - atr * self.atr_stop_mult
+                target = entry + atr * self.atr_target_mult
+                exited = False
+                for j in range(i+1, min(i+21, len(c))):
                     lo = float(l[j])
                     hi = float(h[j])
-                    cl = float(c[j])
-
                     if lo <= stop:
-                        # 손절
-                        ret = (stop - entry) / entry * 100 - self.cost * 100
-                        rets.append(ret)
-                        i = j + 1
-                        exited = True
-                        break
+                        rets.append((stop-entry)/entry*100 - self.cost*100)
+                        i = j+1; exited=True; break
                     elif hi >= target:
-                        # 목표가 도달
-                        ret = (target - entry) / entry * 100 - self.cost * 100
-                        rets.append(ret)
-                        i = j + 1
-                        exited = True
-                        break
-
+                        rets.append((target-entry)/entry*100 - self.cost*100)
+                        i = j+1; exited=True; break
                 if not exited:
-                    # 기간 내 미청산 → 현재가로 청산
                     end_idx = min(i+20, len(c)-1)
-                    ret = (float(c[end_idx]) - entry) / entry * 100 - self.cost * 100
-                    rets.append(ret)
-                    i = end_idx + 1
+                    rets.append((float(c[end_idx])-entry)/entry*100 - self.cost*100)
+                    i = end_idx+1
 
             if not rets:
                 return {"rets": [], "summary": None}
-
-            wins      = sum(1 for r in rets if r > 0)
-            total_ret = float(np.prod(1+np.array(rets)/100)-1)*100
-            summary   = (name, len(rets), wins, round(total_ret,2),
-                        round(np.mean(rets),3))
+            wins    = sum(1 for r in rets if r > 0)
+            tot     = float(np.prod(1+np.array(rets)/100)-1)*100
+            summary = (name, len(rets), wins, round(tot,2), round(np.mean(rets),3))
             return {"rets": rets, "summary": summary}
         except:
             return {"rets": [], "summary": None}
@@ -178,7 +264,7 @@ class Backtester:
         except:
             return {"rets": [], "summary": None}
 
-    # ── ★ 워크포워드 백테스트 ─────────────────────────────────────────────────
+    # ── 워크포워드 백테스트 ───────────────────────────────────────────────────
     def run_walkforward(self, df: pd.DataFrame) -> dict:
         if df is None or len(df) == 0:
             return self._empty_wf()
@@ -194,8 +280,8 @@ class Backtester:
             max_len = max((len(row.get("ohlcv",[])) for _, row in df.iterrows()
                           if row.get("ohlcv") is not None), default=0)
             if max_len >= 50:
-                train = max(20, max_len // 5)
-                test  = max(10, max_len // 10)
+                train = max(20, max_len//5)
+                test  = max(10, max_len//10)
                 valid = [(row, row.get("ohlcv")) for _, row in df.iterrows()
                          if row.get("ohlcv") is not None
                          and len(row.get("ohlcv")) >= train+test+5]
@@ -203,14 +289,14 @@ class Backtester:
                 return self._empty_wf()
 
         max_len   = max(len(o) for _, o in valid)
-        n_windows = max(1, (max_len - train) // test)
+        n_windows = max(1, (max_len-train)//test)
 
         is_all, oos_all, window_log = [], [], []
 
         for w in range(n_windows):
-            s  = w * test
-            ie = s + train
-            oe = ie + test
+            s  = w*test
+            ie = s+train
+            oe = ie+test
 
             scored = []
             for row, ohlcv in valid:
@@ -232,13 +318,11 @@ class Backtester:
                 c_is = ohlcv["close"].astype(float).values[s:ie]
                 if len(c_is) > 1:
                     is_w.extend((((c_is[1:]/c_is[:-1])-1)*100 - self.cost*100).tolist())
-
                 c_oos = ohlcv["close"].astype(float).values[ie:oe]
                 if len(c_oos) > 1:
                     if self.use_atr:
-                        # ATR 적용
-                        tmp_df = ohlcv.iloc[ie:oe]
-                        res    = self._bt_atr(tmp_df, "", len(c_oos)-1)
+                        tmp = ohlcv.iloc[ie:oe]
+                        res = self._bt_atr(tmp, "", len(c_oos)-1)
                         oos_w.extend(res["rets"])
                     else:
                         oos_w.extend((((c_oos[1:]/c_oos[:-1])-1)*100 - self.cost*100).tolist())
@@ -247,7 +331,7 @@ class Backtester:
                 is_all.extend(is_w)
                 oos_all.extend(oos_w)
                 window_log.append({
-                    "윈도우":    w+1,
+                    "윈도우":     w+1,
                     "IS수익(%)":  round(float(np.prod(1+np.array(is_w)/100)-1)*100, 2),
                     "OOS수익(%)": round(float(np.prod(1+np.array(oos_w)/100)-1)*100, 2),
                     "선정종목":   ", ".join([r[0].get("name","") for r in picks[:3]]),
@@ -260,9 +344,9 @@ class Backtester:
         oos_st = self._calc_stats(oos_all, [])
         oos_a  = np.array(oos_all)
 
-        overfit = round(oos_st["total_return"]/(abs(is_st["total_return"])+1e-9), 3)
-        ir      = round(float(oos_a.mean()/(oos_a.std()+1e-9)*np.sqrt(252)), 3)
-        oos_hit = round(float(np.mean(oos_a>0)*100), 1)
+        overfit  = round(oos_st["total_return"]/(abs(is_st["total_return"])+1e-9), 3)
+        ir       = round(float(oos_a.mean()/(oos_a.std()+1e-9)*np.sqrt(252)), 3)
+        oos_hit  = round(float(np.mean(oos_a>0)*100), 1)
 
         return {
             "is":            is_st,
@@ -276,6 +360,7 @@ class Backtester:
             "atr_used":      self.use_atr,
         }
 
+    # ── 공통 유틸 ─────────────────────────────────────────────────────────────
     def _mom_score(self, c: np.ndarray) -> float:
         if len(c) < 5: return 0.0
         s  = (c[-1]/c[-6]-1)*100  if len(c)>=6  else 0
@@ -284,7 +369,7 @@ class Backtester:
         ma20 = c[-20:].mean() if len(c)>=20 else c.mean()
         s += 15 if ma5>ma20 else -5
         if len(c)>=15:
-            d = np.diff(c[-15:])
+            d  = np.diff(c[-15:])
             g  = np.where(d>0,d,0).mean()
             lo = np.where(d<0,-d,0).mean()
             rsi = 100-100/(1+g/(lo+1e-9))
@@ -297,7 +382,6 @@ class Backtester:
         elif overfit>0:                          return "🟠 주의 — 파라미터 재검토"
         else:                                    return "🔴 위험 — OOS 성과 음수"
 
-    # ── 공통 유틸 ─────────────────────────────────────────────────────────────
     def _avg(self, lists):
         if not lists: return []
         ml = max(len(r) for r in lists)
@@ -355,3 +439,10 @@ class Backtester:
                 "overfit_ratio":0,"info_ratio":0,"oos_hit_rate":0,
                 "n_windows":0,"window_log":pd.DataFrame(),
                 "verdict":"데이터 부족","atr_used":self.use_atr}
+
+    def _empty_mc(self):
+        return {"n_simulations":0,"n_days":0,"mean_return":0,"std_return":0,
+                "p5":0,"p25":0,"p50":0,"p75":0,"p95":0,"var_5":0,
+                "win_rate":0,"avg_mdd":0,"worst_mdd":0,"bankruptcy_prob":0,
+                "worst_path":[],"median_path":[],"best_path":[],
+                "verdict":"데이터 부족"}
