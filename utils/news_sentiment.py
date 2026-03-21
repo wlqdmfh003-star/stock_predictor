@@ -400,35 +400,24 @@ class NewsSentiment:
     def _detect_theme(self, articles: list, stock_name: str = "",
                       sector: str = "") -> str:
         """
-        테마 감지 - 3단계 우선순위
-        1순위: 종목명 직접 매핑 (STOCK_THEME_MAP)
-        2순위: 섹터 자동 매핑 (SECTOR_THEME_MAP)
-        3순위: 뉴스 키워드 감지 (THEME_KEYWORDS)
+        테마 감지 - 2단계 (뉴스 키워드 제거 → 오분류 방지)
+        1순위: 종목명 직접 매핑 (STOCK_THEME_MAP) - 가장 정확
+        2순위: 섹터 자동 매핑 (SECTOR_THEME_MAP) - 섹터 기반
+        ★ 뉴스 키워드 감지 제거 (무관한 기사로 오분류 방지)
         """
         found = []
 
-        # 1순위: 종목명 직접 매핑
+        # 1순위: 종목명 직접 매핑 (가장 정확)
         if stock_name and stock_name in STOCK_THEME_MAP:
-            found.extend(STOCK_THEME_MAP[stock_name].split(","))
+            for t in STOCK_THEME_MAP[stock_name].split(","):
+                if t and t not in found:
+                    found.append(t)
 
         # 2순위: 섹터 자동 매핑
-        if sector and sector in SECTOR_THEME_MAP:
+        # (SECTOR_THEME_MAP에 등록된 섹터만 - 조선/IT/금융/유통 등 제외)
+        if len(found) == 0 and sector and sector in SECTOR_THEME_MAP:
             t = SECTOR_THEME_MAP[sector]
-            if t not in found:
+            if t and t not in found:
                 found.append(t)
 
-        # 3순위: 뉴스 키워드 감지 (위에서 못 찾은 경우만)
-        if len(found) < 2:
-            all_text = " ".join(articles)
-            for theme, keywords in THEME_KEYWORDS.items():
-                if theme not in found and any(kw in all_text for kw in keywords):
-                    found.append(theme)
-                    if len(found) >= 3:
-                        break
-
-        # 중복 제거 후 최대 3개
-        seen = []
-        for t in found:
-            if t and t not in seen:
-                seen.append(t)
-        return ",".join(seen[:3]) if seen else ""
+        return ",".join(found[:3]) if found else ""
