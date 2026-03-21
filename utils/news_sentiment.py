@@ -400,24 +400,28 @@ class NewsSentiment:
     def _detect_theme(self, articles: list, stock_name: str = "",
                       sector: str = "") -> str:
         """
-        테마 감지 - 2단계 (뉴스 키워드 제거 → 오분류 방지)
-        1순위: 종목명 직접 매핑 (STOCK_THEME_MAP) - 가장 정확
-        2순위: 섹터 자동 매핑 (SECTOR_THEME_MAP) - 섹터 기반
-        ★ 뉴스 키워드 감지 제거 (무관한 기사로 오분류 방지)
+        테마 감지 - 3단계
+        1순위: 종목명 직접 매핑 (STOCK_THEME_MAP)
+        2순위: 섹터 자동 매핑 (SECTOR_THEME_MAP)
+        3순위: 섹터명 그대로 사용 (테마 없는 종목도 섹터 표시)
+        ★ 뉴스 키워드 감지 제거 (오분류 방지)
         """
         found = []
 
-        # 1순위: 종목명 직접 매핑 (가장 정확)
+        # 1순위: 종목명 직접 매핑
         if stock_name and stock_name in STOCK_THEME_MAP:
             for t in STOCK_THEME_MAP[stock_name].split(","):
                 if t and t not in found:
                     found.append(t)
 
-        # 2순위: 섹터 자동 매핑
-        # (SECTOR_THEME_MAP에 등록된 섹터만 - 조선/IT/금융/유통 등 제외)
+        # 2순위: 섹터→테마 매핑
         if len(found) == 0 and sector and sector in SECTOR_THEME_MAP:
             t = SECTOR_THEME_MAP[sector]
             if t and t not in found:
                 found.append(t)
+
+        # 3순위: 테마 없으면 섹터명을 테마로 사용
+        if len(found) == 0 and sector and sector not in ["기타", ""]:
+            found.append(sector)
 
         return ",".join(found[:3]) if found else ""
