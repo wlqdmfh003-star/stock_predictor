@@ -280,17 +280,17 @@ if analyze_btn:
 
     tw=sum(weights.values()); weights={k:v/tw for k,v in weights.items()} if tw>0 else weights
 
-    if use_sector:
-        with st.spinner("🏭 섹터 분석 중..."): df=SectorAnalysis().analyze(df)
+    # ★ 섹터 분석은 항상 실행 (테마 감지에 필요)
+    with st.spinner("🏭 섹터 분석 중..."): df=SectorAnalysis().analyze(df)
     if use_candle:
         with st.spinner("🕯️ 캔들/차트 패턴 (19가지) 분석 중..."): df=CandlePatterns().analyze(df)
     macro_data={}
     if use_macro:
         with st.spinner("🌍 매크로 지표 수집 중..."):
             mi=MacroIndicators(); macro_data=mi.fetch(); df=mi.apply_to_stocks(df,macro_data)
-    if use_sentiment:
-        with st.spinner("📰 뉴스 감성 AI (KoBERT/키워드) 분석 중..."):
-            df=NewsSentiment(client_id=naver_id,client_secret=naver_secret).analyze(df)
+    # ★ 뉴스 감성은 항상 실행 (테마 생성 필요)
+    with st.spinner("📰 뉴스 감성 AI (KoBERT/키워드) 분석 중..."):
+        df=NewsSentiment(client_id=naver_id,client_secret=naver_secret).analyze(df)
     if use_institution:
         with st.spinner("🏛️ 기관/외인 수급 분석 중..."):
             try:
@@ -316,6 +316,14 @@ if analyze_btn:
     if use_ensemble:
         with st.spinner("🤝 앙상블 (XGBoost+LightGBM, 70피처, 트리플 타임프레임) 예측 중..."):
             df=EnsembleModel().predict_batch(df)
+
+    # ★ sector/theme_tag 최종 안전망
+    if "sector" not in df.columns or df["sector"].isna().all():
+        df = SectorAnalysis().analyze(df)
+    if "theme_tag" not in df.columns or df["theme_tag"].isna().all():
+        _ns2 = NewsSentiment(client_id=naver_id, client_secret=naver_secret)
+        _ns2._fetch_news = lambda n: []
+        df = _ns2.analyze(df)
 
     with st.spinner("🎯 최종 점수 계산 중 (ATR 손절/상관관계/요일효과)..."):
         scorer=MultiFactorScorer(weights=weights)
