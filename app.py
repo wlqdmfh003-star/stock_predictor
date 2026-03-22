@@ -317,13 +317,25 @@ if analyze_btn:
         with st.spinner("🤝 앙상블 (XGBoost+LightGBM, 70피처, 트리플 타임프레임) 예측 중..."):
             df=EnsembleModel().predict_batch(df)
 
-    # ★ sector/theme_tag 최종 안전망
+    # ★ sector/theme_tag 최종 안전망 (직접 계산)
     if "sector" not in df.columns or df["sector"].isna().all():
         df = SectorAnalysis().analyze(df)
     if "theme_tag" not in df.columns or df["theme_tag"].isna().all():
-        _ns2 = NewsSentiment(client_id=naver_id, client_secret=naver_secret)
-        _ns2._fetch_news = lambda n: []
-        df = _ns2.analyze(df)
+        from utils.news_sentiment import CODE_THEME_MAP, STOCK_THEME_MAP, SECTOR_THEME_MAP
+        def _get_theme(row):
+            code   = str(row.get("code","")   or "")
+            name   = str(row.get("name","")   or "")
+            sector = str(row.get("sector","") or "")
+            if code in CODE_THEME_MAP:
+                return CODE_THEME_MAP[code]
+            if name in STOCK_THEME_MAP:
+                return STOCK_THEME_MAP[name]
+            if sector in SECTOR_THEME_MAP:
+                return SECTOR_THEME_MAP[sector]
+            if sector and sector not in ["기타",""]:
+                return sector
+            return ""
+        df["theme_tag"] = df.apply(_get_theme, axis=1)
 
     with st.spinner("🎯 최종 점수 계산 중 (ATR 손절/상관관계/요일효과)..."):
         scorer=MultiFactorScorer(weights=weights)
