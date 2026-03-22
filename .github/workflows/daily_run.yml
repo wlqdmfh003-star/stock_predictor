@@ -28,7 +28,8 @@ jobs:
           streamlit pandas numpy yfinance \
           xgboost lightgbm catboost torch \
           scikit-learn requests beautifulsoup4 plotly \
-          transformers sentencepiece huggingface_hub scipy
+          transformers sentencepiece huggingface_hub scipy \
+          pykrx
 
     - name: 분석 실행
       env:
