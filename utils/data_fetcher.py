@@ -40,7 +40,7 @@ class DataFetcher:
                         if code not in self._ticker_market_map:
                             self._ticker_market_map[code] = mkt
                     tickers.extend(t)
-                    print(f"✅ pykrx {mkt} 종목리스트: {len(t)}개")
+                    print(f"[OK] pykrx {mkt} 종목리스트: {len(t)}개")
                     try:
                         for code in t:
                             if code not in self._ticker_name_map:
@@ -82,7 +82,7 @@ class DataFetcher:
                     if found == 0: break
                     time.sleep(0.05)
                 tickers.extend(t_naver)
-                print(f"✅ 네이버 {mkt} 종목리스트: {len(t_naver)}개")
+                print(f"[OK] 네이버 {mkt} 종목리스트: {len(t_naver)}개")
             except Exception as e:
                 print(f"⚠️ {mkt} 종목리스트 수집 실패: {e}")
 
@@ -133,6 +133,21 @@ class DataFetcher:
 
             filtered = cap_df[cap_df.index.isin(valid) & cap_df.index.isin(ticker_set)].copy()
 
+            # ★ ETF/인덱스 종목 제외 (섹터/테마 분석 불가)
+            etf_keywords = [
+                'KODEX','TIGER','KBSTAR','ARIRANG','HANARO',
+                'KOSEF','FOCUS','SOL','ACE','PLUS','RISE',
+                'TIMEFOLIO','SMART','TREX','WON','BNK',
+            ]
+            etf_names = getattr(self, '_ticker_name_map', {})
+            etf_codes  = set()
+            for code, name in etf_names.items():
+                if any(kw in str(name) for kw in etf_keywords):
+                    etf_codes.add(code)
+            if etf_codes:
+                filtered = filtered[~filtered.index.isin(etf_codes)]
+                print(f"  [ETF 제외] {len(etf_codes)}개 ETF/인덱스 종목 제외")
+
             if vol_frames:
                 vm = pd.concat(vol_frames)
                 vm = vm[~vm.index.duplicated(keep='first')]
@@ -154,7 +169,7 @@ class DataFetcher:
                           .sort_values("거래대금",ascending=False).index.tolist()[:pool_size]
             pool        = kospi_pool + kosdaq_pool
 
-            print(f"📊 사전 스코어링 중... (KOSPI {len(kospi_pool)}개 / KOSDAQ {len(kosdaq_pool)}개)")
+            print(f"[분석] 사전 스코어링 중... (KOSPI {len(kospi_pool)}개 / KOSDAQ {len(kosdaq_pool)}개)")
 
             if not kospi_pool and not kosdaq_pool:
                 return filtered.sort_values("거래대금",ascending=False).index.tolist()[:self.top_n]
@@ -356,7 +371,7 @@ class DataFetcher:
     def fetch_institution_data(self, df):
         inst_data = {}
         start_5d  = (datetime.now()-timedelta(days=10)).strftime("%Y%m%d")
-        print("🏛️ 기관/외인 수급 수집 중...")
+        print("[기관/외인] 수급 수집 중...")
         total = len(df)
         for i, code in enumerate(df["code"].tolist()):
             try:

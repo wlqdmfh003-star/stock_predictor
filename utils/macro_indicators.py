@@ -180,6 +180,22 @@ class MacroIndicators:
                 score += np.clip((oil_val - 70) * 0.2, -8, 10)
                 score += np.clip(-dxy_chg * 1.5, -6, 8)
 
+            # ★ 기타 섹터도 종목명으로 차별화
+            else:
+                # 전자/IT 계열
+                if any(kw in name for kw in ["LG전자","삼성전기","LG이노텍","삼성SDS"]):
+                    score += np.clip(ewy_chg * 2, -8, 10)
+                # 통신
+                elif any(kw in name for kw in ["SK텔레콤","KT","LG유플러스"]):
+                    score += np.clip(-rate_chg * 15, -8, 8)
+                # 바이오/제약 계열
+                elif any(kw in name for kw in ["SK바이오","한미사이언스","동아"]):
+                    if vix < 15: score += 8
+                    elif vix > 25: score -= 5
+                # ETF/인덱스는 중립
+                elif any(kw in name for kw in ["KODEX","TIGER","KBSTAR","ARIRANG","SOL","ACE"]):
+                    score = base  # 기본값 유지
+
             macro_scores.append(float(np.clip(score, 0, 100)))
 
         df["macro_score"] = macro_scores

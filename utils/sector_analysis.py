@@ -48,7 +48,13 @@ class SectorAnalysis:
             "클래시스","인바디","뷰웍스","바텍","오스템임플란트",
             "덴티움","레이","디오","씨젠","수젠텍","SD바이오센서",
             "SK바이오팜","SK바이오사이언스","한미사이언스","일동홀딩스",
-            "동아에스티","제일약품","경동나비엔","유한킴벌리",
+            "동아에스티","제일약품","유한킴벌리",
+            # ★ 추가
+            "리가켐바이오","파마리서치","에스티팜","오리온바이오로직스",
+            "바이오플러스","동화약품","보령","일양약품","한국비엔씨",
+            "지씨셀","ABL바이오","레고켐바이오","올릭스","에이비엘바이오",
+            "메디포스트","차바이오텍","강스템바이오텍","테고사이언스",
+            "비씨월드제약","파멥신","압타머사이언스","오스코텍",
         ],
         "자동차/부품": [
             "현대차","기아","현대모비스","한온시스템","만도",
@@ -119,10 +125,20 @@ class SectorAnalysis:
             "로보티즈","티로보틱스","에스피지","나인봇","클로봇",
             "원익로보틱스","한화로보틱스","도구공간","뉴로메카","한컴로보틱스",
         ],
+        "ETF/인덱스": [
+            "KODEX","TIGER","KBSTAR","ARIRANG","HANARO",
+            "KOSEF","SOL","ACE","PLUS","RISE","FOCUS",
+            "TIMEFOLIO","SMART","TREX","WON","BNK",
+            "WOORI","TRUSTON","ITOUCH","SYNERGY",
+        ],
         "유통/소비": [
             "롯데쇼핑","신세계","이마트","현대백화점","GS리테일",
             "BGF리테일","CJ제일제당","오리온","농심","롯데칠성",
             "하이트진로","무학","신라면세점","호텔신라","파라다이스",
+            # ★ 뷰티/화장품 추가
+            "에이피알","아모레퍼시픽","LG생활건강","코스맥스","한국콜마",
+            "클리오","토니모리","잇츠한불","에이블씨엔씨","애경산업",
+            "파마리서치프로","브이티","실리콘투","네오팜","제이준코스메틱",
         ],
     }
 
@@ -145,15 +161,29 @@ class SectorAnalysis:
         return df
 
     def _get_sector(self, name: str) -> str:
-        # ★ 정확 매칭 우선, 부분 매칭은 후순위
+        # ★ ETF 먼저 감지
+        etf_keywords = [
+            "KODEX","TIGER","KBSTAR","ARIRANG","HANARO",
+            "KOSEF","SOL ","ACE ","PLUS ","RISE ","FOCUS",
+            "TIMEFOLIO","SMART","TREX","WON ","BNK ",
+        ]
+        if any(kw in name for kw in etf_keywords):
+            return "ETF/인덱스"
+
         # 1순위: 완전 일치
         for sector, stocks in self.SECTORS.items():
+            if sector == "ETF/인덱스":
+                continue
             if name in stocks:
                 return sector
-        # 2순위: 부분 매칭 (종목명이 사전에 포함된 경우)
+
+        # 2순위: 부분 매칭
         for sector, stocks in self.SECTORS.items():
+            if sector == "ETF/인덱스":
+                continue
             if any(stock in name for stock in stocks):
                 return sector
+
         return "기타"
 
     def _calc_sector_stats(self, df: pd.DataFrame) -> dict:
