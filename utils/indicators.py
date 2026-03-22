@@ -871,6 +871,43 @@ class TechnicalIndicators:
             "atr_ratio": 1.5, "half_kelly": 5.0, "risk_score": 50.0,
         }
 
+
+    def _default_ichimoku(self) -> dict:
+        return {
+            "ichi_tenkan":      0.0,
+            "ichi_kijun":       0.0,
+            "ichi_above_cloud": 0,
+            "ichi_below_cloud": 0,
+            "ichi_in_cloud":    0,
+            "ichi_golden":      0,
+            "ichi_dead":        0,
+            "ichi_score":       50.0,
+        }
+
+    def _default_fibonacci(self) -> dict:
+        return {
+            "fib_0":               0.0,
+            "fib_236":             0.0,
+            "fib_382":             0.0,
+            "fib_500":             0.0,
+            "fib_618":             0.0,
+            "fib_786":             0.0,
+            "fib_100":             0.0,
+            "fib_pct":             50.0,
+            "fib_nearest_support": 0.0,
+            "fib_nearest_resist":  0.0,
+            "fib_at_golden":       0,
+            "fib_score":           50.0,
+        }
+
+    def _default_elliott(self) -> dict:
+        return {
+            "elliott_wave_pos": "데이터부족",
+            "elliott_score":    50.0,
+            "elliott_peak":     0.0,
+            "elliott_trough":   0.0,
+        }
+
     def _default_indicators(self):
         d = {
             "rsi": 0.0, "macd": 0.0, "macd_signal": 0.0,
