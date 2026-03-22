@@ -22,7 +22,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 st.set_page_config(
-    page_title="📈 내일 주식 상승 예측 v5.3",
+    page_title="📈 내일 주식 상승 예측 v7.2",
     page_icon="📈", layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -83,10 +83,11 @@ from models.ensemble_model   import EnsembleModel
 
 st.markdown("""
 <div class="main-header">
-  <h1>📈 내일 주식 상승 종목 예측 v5.3</h1>
-  <p>LSTM · XGBoost+LightGBM(70개 피처) · 트리플 타임프레임(일봉+주봉+월봉) · 허스트/엔트로피/자기상관
-  · 캔들패턴 19가지 · ATR 동적 손절/목표가 · 상관관계 필터 · 요일/월말 효과
-  · KoBERT 뉴스AI · 매크로 · 기관수급 · 재무 · DART · 공매도 · 섹터 · 자기학습</p>
+  <h1>📈 내일 주식 상승 종목 예측 v7.2</h1>
+  <p>LSTM · XGBoost+LightGBM+CatBoost(109개 피처) · 트리플 타임프레임(일봉+주봉+월봉)
+  · 일목균형표 · 피보나치 · 엘리어트파동 · CNN패턴 · 캔들패턴 19가지
+  · ATR 동적 손절/목표가 · 상관관계 필터 · 요일/월말 효과 · 섹터 yfinance 자동분류
+  · KoBERT 뉴스AI · 매크로 · 기관수급 · 재무 · DART · 공매도 · 옵션전략 · 자기학습</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -105,7 +106,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🔧 분석 모듈")
     use_lstm        = st.checkbox("🧠 LSTM 예측",              value=True)
-    use_ensemble    = st.checkbox("🤝 앙상블(XGB+LGB+70피처)", value=True)
+    use_ensemble    = st.checkbox("🤝 앙상블(XGB+LGB+CatBoost+109피처)", value=True)
     use_candle      = st.checkbox("🕯️ 캔들/차트 패턴",          value=True)
     use_macro       = st.checkbox("🌍 매크로 지표",             value=True)
     use_sentiment   = st.checkbox("📰 뉴스 감성 AI (KoBERT)",   value=True)
@@ -214,7 +215,7 @@ if _banner_stats["completed"] > 0:
 tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8,tab9,tab10,tab11,tab12 = st.tabs([
     "🎯 예측결과","🌎 미국/매크로","🏭 섹터","🕯️ 캔들패턴",
     "📊 시장국면","🔗 포트폴리오","📋 백테스트","🧬 자기학습",
-    "🔍 예측설명","🔵 클러스터링","🎯 옵션전략","📖 가이드 v7.0"
+    "🔍 예측설명","🔵 클러스터링","🎯 옵션전략","📖 가이드 v7.2"
 ])
 
 if analyze_btn:
@@ -314,7 +315,7 @@ if analyze_btn:
     if use_lstm:
         with st.spinner("🧠 LSTM 예측 중..."): df=LSTMPredictor().predict_batch(df)
     if use_ensemble:
-        with st.spinner("🤝 앙상블 (XGBoost+LightGBM, 70피처, 트리플 타임프레임) 예측 중..."):
+        with st.spinner("🤝 앙상블 (XGB+LGB+CatBoost, 109피처, 트리플 타임프레임) 예측 중..."):
             df=EnsembleModel().predict_batch(df)
 
     # ★ sector/theme_tag 최종 안전망 (직접 계산)
@@ -699,7 +700,7 @@ if analyze_btn:
     # ════════════════════════════════════════════════════════════════════════
     with tab7:
         period_map=Backtester.PERIOD_MAP; lookback=period_map.get(bt_period,250)
-        st.markdown(f"### 📋 백테스트 v7.0 — {bt_period} / TOP {bt_top_k}")
+        st.markdown(f"### 📋 백테스트 v7.2 — {bt_period} / TOP {bt_top_k}")
         if use_backtest:
             bt_col1, bt_col2 = st.columns(2)
             with bt_col1:
@@ -860,7 +861,7 @@ if analyze_btn:
     # 탭 8: 자기학습 v5.4
     # ════════════════════════════════════════════════════════════════════════
     with tab8:
-        st.markdown("### 🧬 자기학습 v7.0 — DQN 강화학습 + 베이지안 + 메타러닝")
+        st.markdown("### 🧬 자기학습 v7.2 — DQN 강화학습 + 베이지안 + 메타러닝")
         # 기본 현황
         c1,c2,c3,c4=st.columns(4)
         with c1: st.metric("총 예측 저장",  f"{ns2['total']}건")
@@ -1162,7 +1163,7 @@ if analyze_btn:
 # ════════════════════════════════════════════════════════════════════════════
 with tab12:
     st.markdown("""
-### 📖 사용 가이드 v7.0
+### 📖 사용 가이드 v7.2
 
 #### 🆕 v5.6 업그레이드 내용
 
@@ -1187,7 +1188,7 @@ with tab12:
 | KIS 호가 완전활용 | 타이밍↑ | 10호가 매수벽/매도벽/기울기 분석 |
 | 시장국면별 가중치 | 정확도↑ | 강세/약세/횡보 상황별 다른 가중치 적용 |
 
-#### 🆕 v5.3 업그레이드 내용
+#### 🆕 v7.2 업그레이드 내용
 
 | 업그레이드 | 효과 | 설명 |
 |-----------|------|------|
