@@ -1,4 +1,4 @@
-name: 주식 예측 자동 실행
+name: 주식 예측 자동 실행 v7.2
 
 on:
   schedule:
@@ -6,11 +6,12 @@ on:
     - cron: '0 3 * * 1-5'    # 한국시간 12:00 (월~금)
     - cron: '0 8 * * 1-5'    # 한국시간 17:00 (월~금)
     - cron: '30 14 * * 1-5'  # 한국시간 23:30 (월~금)
-  workflow_dispatch:          # 수동 실행 가능
+  workflow_dispatch:
 
 jobs:
   run-prediction:
     runs-on: ubuntu-latest
+    timeout-minutes: 55
 
     steps:
     - name: 코드 받기
@@ -23,10 +24,11 @@ jobs:
 
     - name: 패키지 설치
       run: |
-        pip install streamlit pandas numpy yfinance \
+        pip install \
+          streamlit pandas numpy yfinance \
           xgboost lightgbm catboost torch \
           scikit-learn requests beautifulsoup4 plotly \
-          transformers sentencepiece pykrx
+          transformers sentencepiece huggingface_hub scipy
 
     - name: 분석 실행
       env:
@@ -42,81 +44,184 @@ jobs:
         TRANSFORMERS_VERBOSITY: error
         HF_HUB_DISABLE_PROGRESS_BARS: "1"
       run: |
-        python -c "
+        python << 'PYEOF'
         import os, sys
         sys.path.insert(0, '.')
 
-        kis_key      = os.environ.get('KIS_APP_KEY', '')
-        kis_secret   = os.environ.get('KIS_APP_SECRET', '')
-        kis_acct     = os.environ.get('KIS_ACCOUNT', '')
-        naver_id     = os.environ.get('NAVER_CLIENT_ID', '')
-        naver_sec    = os.environ.get('NAVER_CLIENT_SECRET', '')
-        dart_key     = os.environ.get('DART_API_KEY', '')
-        tg_token     = os.environ.get('TELEGRAM_TOKEN', '')
-        tg_chat_id   = os.environ.get('TELEGRAM_CHAT_ID', '')
+        kis_key    = os.environ.get('KIS_APP_KEY', '')
+        kis_secret = os.environ.get('KIS_APP_SECRET', '')
+        kis_acct   = os.environ.get('KIS_ACCOUNT', '')
+        naver_id   = os.environ.get('NAVER_CLIENT_ID', '')
+        naver_sec  = os.environ.get('NAVER_CLIENT_SECRET', '')
+        dart_key   = os.environ.get('DART_API_KEY', '')
+        tg_token   = os.environ.get('TELEGRAM_TOKEN', '')
+        tg_chat_id = os.environ.get('TELEGRAM_CHAT_ID', '')
 
-        print('자동 분석 시작...')
-
-        from utils.data_fetcher import DataFetcher
-        from utils.news_sentiment import NewsSentiment
-        from utils.fundamental import FundamentalAnalyzer
-        from utils.dart_disclosure import DartDisclosure
-        from utils.kis_api import KISApi
-        from utils.learning_tracker import LearningTracker
-        from models.lstm_model import LSTMPredictor
-        from models.ensemble_model import EnsembleModel
-        from models.multi_factor import MultiFactorScorer
+        print('=== v7.2 자동 분석 시작 ===')
 
         # 데이터 수집
+        from utils.data_fetcher import DataFetcher
         df = DataFetcher(market='KOSPI+KOSDAQ', top_n=200).fetch_all_parallel()
         print(f'종목 수집: {len(df)}개')
 
+        # 기술적 지표
+        try:
+            from utils.indicators import TechnicalIndicators
+            df = TechnicalIndicators().calculate_all(df)
+            print('기술적 지표 완료')
+        except Exception as e:
+            print(f'[주의] 기술적 지표: {e}')
+
         # KIS 수급
-        if kis_key and kis_secret:
-            df = KISApi(kis_key, kis_secret, kis_acct).get_institution_data(df)
+        try:
+            if kis_key and kis_secret:
+                from utils.kis_api import KISApi
+                df = KISApi(kis_key, kis_secret, kis_acct).get_institution_data(df)
+                print('KIS 수급 완료')
+        except Exception as e:
+            print(f'[주의] KIS: {e}')
 
         # 뉴스 감성
-        df = NewsSentiment(naver_id, naver_sec).analyze(df)
+        try:
+            from utils.news_sentiment import NewsSentiment
+            df = NewsSentiment(naver_id, naver_sec).analyze(df)
+            print('뉴스 감성 완료')
+        except Exception as e:
+            print(f'[주의] 뉴스: {e}')
 
         # 재무
-        df = FundamentalAnalyzer().fetch_and_score(df)
+        try:
+            from utils.fundamental import FundamentalAnalyzer
+            df = FundamentalAnalyzer().fetch_and_score(df)
+            print('재무 완료')
+        except Exception as e:
+            print(f'[주의] 재무: {e}')
 
         # DART
-        df = DartDisclosure(dart_key).fetch_and_score(df)
+        try:
+            from utils.dart_disclosure import DartDisclosure
+            df = DartDisclosure(dart_key).fetch_and_score(df)
+            print('DART 완료')
+        except Exception as e:
+            print(f'[주의] DART: {e}')
 
-        # LSTM + 앙상블
-        df = LSTMPredictor().predict_batch(df)
-        df = EnsembleModel().predict_batch(df)
+        # 공매도
+        try:
+            from utils.short_selling import ShortSelling
+            df = ShortSelling().fetch_and_score(df)
+            print('공매도 완료')
+        except Exception as e:
+            print(f'[주의] 공매도: {e}')
+
+        # 52주 신고가
+        try:
+            from utils.high_low_52week import HighLow52Week
+            df = HighLow52Week().fetch_and_score(df)
+            print('52주 완료')
+        except Exception as e:
+            print(f'[주의] 52주: {e}')
+
+        # 매크로
+        try:
+            from utils.macro_indicators import MacroIndicators
+            mi = MacroIndicators()
+            macro_data = mi.fetch()
+            df = mi.apply_to_stocks(df, macro_data)
+            print('매크로 완료')
+        except Exception as e:
+            print(f'[주의] 매크로: {e}')
+
+        # 미국 증시
+        try:
+            from utils.us_market import USMarket
+            um = USMarket()
+            df = um.apply_to_stocks(df, um.fetch())
+            print('미국 증시 완료')
+        except Exception as e:
+            print(f'[주의] 미국 증시: {e}')
+
+        # 섹터 분석
+        try:
+            from utils.sector_analysis import SectorAnalysis
+            df = SectorAnalysis().analyze(df)
+            print('섹터 완료')
+        except Exception as e:
+            print(f'[주의] 섹터: {e}')
+
+        # 실적 캘린더
+        try:
+            from utils.earnings_calendar import EarningsCalendar
+            df = EarningsCalendar().fetch_and_score(df)
+            print('실적 캘린더 완료')
+        except Exception as e:
+            print(f'[주의] 실적 캘린더: {e}')
+
+        # 거래량 탐지
+        try:
+            from utils.volume_detector import VolumeDetector
+            df = VolumeDetector().detect(df)
+            print('거래량 완료')
+        except Exception as e:
+            print(f'[주의] 거래량: {e}')
+
+        # 옵션 전략
+        try:
+            from utils.option_strategy import OptionStrategy
+            df = OptionStrategy().analyze(df)
+            print('옵션 완료')
+        except Exception as e:
+            print(f'[주의] 옵션: {e}')
+
+        # LSTM
+        try:
+            from models.lstm_model import LSTMPredictor
+            df = LSTMPredictor().predict_batch(df)
+            print('LSTM 완료')
+        except Exception as e:
+            print(f'[주의] LSTM: {e}')
+
+        # 앙상블
+        try:
+            from models.ensemble_model import EnsembleModel
+            df = EnsembleModel().predict_batch(df)
+            print('앙상블 완료')
+        except Exception as e:
+            print(f'[주의] 앙상블: {e}')
 
         # 최종 점수
+        from models.multi_factor import MultiFactorScorer
         df = MultiFactorScorer().score(df)
+        df = df.sort_values('rise_prob', ascending=False).reset_index(drop=True)
+        print('최종 점수 완료')
 
-        # 자기학습 저장
+        # 자기학습
+        from utils.learning_tracker import LearningTracker
         tracker = LearningTracker()
         tracker.update_results(df)
         saved = tracker.save_predictions(df)
         stats  = tracker.get_stats()
+        print(f'저장: {saved}건 / 누적: {stats["total"]}건 / 적중률: {stats["hit_rate"]}%')
 
-        print(f'분석 완료! 저장: {saved}건')
-        print(f'누적: {stats[\"total\"]}건 / 적중률: {stats[\"hit_rate\"]}%')
-
-        # ── 텔레그램 TOP5 알림 ─────────────────────────────────
+        # 텔레그램 TOP5
         if tg_token and tg_chat_id:
             import requests as req
             from datetime import datetime
 
-            today   = datetime.now().strftime('%Y-%m-%d')
-            top5    = df.head(5)
-            lines   = [f'📈 오늘의 TOP5 예측 종목 ({today})\n']
+            today = datetime.now().strftime('%Y-%m-%d')
+            top5  = df.head(5)
+            lines = [f'📈 오늘의 TOP5 예측 종목 ({today})\n']
 
             for i, (_, row) in enumerate(top5.iterrows(), 1):
-                name   = row.get('name', '')
-                prob   = row.get('rise_prob', 0)
-                price  = int(row.get('current_price', 0))
-                target = int(row.get('target_price', 0))
-                stop   = int(row.get('stop_price', 0))
-                roe    = row.get('roe', 0)
-                theme  = row.get('theme_tag', '')
+                name   = str(row.get('name', ''))
+                prob   = float(row.get('rise_prob', 0))
+                price  = int(float(row.get('current_price', 0) or 0))
+                target = int(float(row.get('target_price', 0) or 0))
+                stop   = int(float(row.get('stop_price', 0) or 0))
+                sector = str(row.get('sector', ''))
+                theme  = str(row.get('theme_tag', ''))
+                elli   = str(row.get('elliott_wave_pos', ''))
+                cnn    = str(row.get('cnn_pattern', ''))
+                frgn   = row.get('foreign_consec', 0)
 
                 line = (
                     f'{i}. {name}\n'
@@ -125,22 +230,41 @@ jobs:
                     f'   목표가: {target:,}원\n'
                     f'   손절가: {stop:,}원\n'
                 )
-                if roe and float(roe) != 0:
-                    line += f'   ROE: {float(roe):.1f}%\n'
-                if theme:
+                if sector and sector not in ['기타', 'nan', '']:
+                    line += f'   섹터: {sector}\n'
+                if theme and theme not in ['nan', '']:
                     line += f'   테마: {theme}\n'
+                try:
+                    roe = float(row.get('roe', 0) or 0)
+                    if roe != 0:
+                        line += f'   ROE: {roe:.1f}%\n'
+                except Exception:
+                    pass
+                if elli and elli not in ['데이터부족', 'nan', '']:
+                    line += f'   파동: {elli}\n'
+                if cnn and cnn not in ['없음', 'nan', '']:
+                    line += f'   패턴: {cnn}\n'
+                try:
+                    fc = int(float(str(frgn).split('.')[0]))
+                    if fc >= 3:
+                        line += f'   외국인: {fc}일 연속 순매수 🔥\n'
+                    elif fc <= -3:
+                        line += f'   외국인: {abs(fc)}일 연속 순매도 ⚠️\n'
+                except Exception:
+                    pass
+
                 lines.append(line)
 
-            lines.append(f'\n✅ 자기학습 누적: {stats[\"total\"]}건')
-            lines.append(f'🎯 적중률: {stats[\"hit_rate\"]}%')
-            lines.append(f'💰 평균수익: {stats[\"avg_return\"]:+.2f}%')
+            lines.append(f'\n✅ 자기학습 누적: {stats["total"]}건')
+            lines.append(f'🎯 적중률: {stats["hit_rate"]}%')
+            lines.append(f'💰 평균수익: {stats["avg_return"]:+.2f}%')
 
-            msg = '\n'.join(lines)
-            url = f'https://api.telegram.org/bot{tg_token}/sendMessage'
-            req.post(url, json={
-                'chat_id': tg_chat_id,
-                'text':    msg,
+            msg  = '\n'.join(lines)
+            url  = f'https://api.telegram.org/bot{tg_token}/sendMessage'
+            resp = req.post(url, json={
+                'chat_id':    tg_chat_id,
+                'text':       msg,
                 'parse_mode': 'HTML'
             }, timeout=10)
-            print('텔레그램 알림 전송 완료!')
-        "
+            print(f'텔레그램 전송 완료! status={resp.status_code}')
+        PYEOF
