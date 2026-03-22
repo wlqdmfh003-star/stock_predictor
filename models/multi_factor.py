@@ -470,6 +470,48 @@ class MultiFactorScorer:
         except Exception:
             return base
 
+
+    def _fix_theme_sector(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        테마/섹터 최종 보정
+        - 테마가 비어있으면 코드/이름 기반으로 재감지
+        - 섹터가 기타면 재분류 시도
+        """
+        try:
+            from utils.news_sentiment import CODE_THEME_MAP, STOCK_THEME_MAP, SECTOR_THEME_MAP
+            from utils.sector_analysis import SectorAnalysis
+            sa = SectorAnalysis()
+
+            for idx, row in df.iterrows():
+                code   = str(row.get("code",   "") or "")
+                name   = str(row.get("name",   "") or "")
+                sector = str(row.get("sector", "") or "")
+                theme  = str(row.get("theme_tag", "") or "")
+
+                # 섹터 보정
+                if not sector or sector in ["기타", "nan", ""]:
+                    new_sector = sa._get_sector(name)
+                    if new_sector != "기타":
+                        df.at[idx, "sector"] = new_sector
+                        sector = new_sector
+
+                # 테마 보정 (비어있을 때)
+                if not theme or theme in ["nan", ""]:
+                    # 1. 코드 기반
+                    if code and code in CODE_THEME_MAP:
+                        df.at[idx, "theme_tag"] = CODE_THEME_MAP[code]
+                    # 2. 이름 기반
+                    elif name and name in STOCK_THEME_MAP:
+                        df.at[idx, "theme_tag"] = STOCK_THEME_MAP[name]
+                    # 3. 섹터 기반
+                    elif sector and sector in SECTOR_THEME_MAP:
+                        df.at[idx, "theme_tag"] = SECTOR_THEME_MAP[sector]
+                    # 4. 섹터명 그대로
+                    elif sector and sector not in ["기타", "nan", ""]:
+                        df.at[idx, "theme_tag"] = sector
+        except Exception as e:
+            pass
+        return df
     def _to_prob(self, score):
         x = (score-50)/15
         return float(np.clip(1/(1+np.exp(-x))*100, 35, 92))

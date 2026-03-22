@@ -334,8 +334,16 @@ class NewsSentiment:
             if not articles:
                 scores.append(50.0)
                 summaries.append("뉴스없음")
-                themes.append("")
-                self._cache[cache_key] = {"score":50.0,"summary":"뉴스없음","theme":""}
+                # ★ 뉴스 없어도 코드/섹터 기반 테마 감지
+                sector_val = str(row.get("sector", "")) if hasattr(row, "get") else ""
+                code_val   = str(row.get("code",   "")) if hasattr(row, "get") else ""
+                theme_no_news = self._detect_theme([], name, sector_val, code_val)
+                themes.append(theme_no_news)
+                self._cache[cache_key] = {
+                    "score": 50.0,
+                    "summary": "뉴스없음",
+                    "theme": theme_no_news
+                }
                 continue
 
             # 감성 점수
