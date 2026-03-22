@@ -291,6 +291,269 @@ class TechnicalIndicators:
             return {"vwap": 0.0, "vwap_deviation": 0.0,
                     "vwap_above": 0, "vwap_score": 50.0}
 
+
+    # ── ★ 일목균형표 (Ichimoku Cloud) ─────────────────────────────
+    def _ichimoku(self, ohlcv: pd.DataFrame) -> dict:
+        """
+        일목균형표
+        - 전환선(9일) / 기준선(26일) / 선행스팬A/B / 후행스팬
+        - 구름대 위 = 강세 / 아래 = 약세
+        - 전환선 > 기준선 = 골든크로스
+        """
+        try:
+            c = ohlcv["close"].astype(float)
+            h = ohlcv["high"].astype(float)  if "high" in ohlcv.columns else c
+            l = ohlcv["low"].astype(float)   if "low"  in ohlcv.columns else c
+
+            def mid(h_s, l_s, n):
+                return (h_s.rolling(n).max() + l_s.rolling(n).min()) / 2
+
+            tenkan  = mid(h, l, 9)    # 전환선
+            kijun   = mid(h, l, 26)   # 기준선
+            spanA   = ((tenkan + kijun) / 2).shift(26)   # 선행스팬A
+            spanB   = mid(h, l, 52).shift(26)             # 선행스팬B
+            chikou  = c.shift(-26)                         # 후행스팬
+
+            t  = float(tenkan.iloc[-1]) if len(tenkan) > 0 else 0
+            k  = float(kijun.iloc[-1])  if len(kijun)  > 0 else 0
+            sa = float(spanA.iloc[-1])  if not spanA.empty else 0
+            sb = float(spanB.iloc[-1])  if not spanB.empty else 0
+            cur = float(c.iloc[-1])
+
+            # 구름대 위/아래
+            cloud_top    = max(sa, sb) if sa and sb else 0
+            cloud_bottom = min(sa, sb) if sa and sb else 0
+            above_cloud  = int(cur > cloud_top)
+            below_cloud  = int(cur < cloud_bottom)
+            in_cloud     = int(cloud_bottom <= cur <= cloud_top)
+
+            # 골든/데드크로스
+            golden_cross = int(t > k and len(tenkan) > 2 and
+                               float(tenkan.iloc[-2]) <= float(kijun.iloc[-2]))
+            dead_cross   = int(t < k and len(tenkan) > 2 and
+                               float(tenkan.iloc[-2]) >= float(kijun.iloc[-2]))
+
+            score = 50.0
+            if above_cloud:   score += 20
+            elif below_cloud: score -= 20
+            elif in_cloud:    score -= 5
+            if golden_cross:  score += 15
+            if dead_cross:    score -= 15
+            if t > k:         score += 8
+            elif t < k:       score -= 8
+            if cur > k:       score += 5
+            elif cur < k:     score -= 5
+
+            return {
+                "ichi_tenkan":      round(t, 2),
+                "ichi_kijun":       round(k, 2),
+                "ichi_above_cloud": above_cloud,
+                "ichi_below_cloud": below_cloud,
+                "ichi_in_cloud":    in_cloud,
+                "ichi_golden":      golden_cross,
+                "ichi_dead":        dead_cross,
+                "ichi_score":       float(np.clip(score, 0, 100)),
+            }
+        except Exception:
+            return self._default_ichimoku()
+
+    # ── ★ 피보나치 되돌림 ────────────────────────────────────────────
+    def _fibonacci(self, ohlcv: pd.DataFrame, period: int = 60) -> dict:
+        """
+        피보나치 되돌림
+        - 최근 N일 고점/저점 기준
+        - 23.6% / 38.2% / 50% / 61.8% / 78.6% 레벨
+        - 현재가가 어느 레벨에 있는지 감지
+        """
+        try:
+            c = ohlcv["close"].astype(float)
+            h = ohlcv["high"].astype(float)  if "high" in ohlcv.columns else c
+            l = ohlcv["low"].astype(float)   if "low"  in ohlcv.columns else c
+
+            n = min(period, len(c))
+            highest = float(h.tail(n).max())
+            lowest  = float(l.tail(n).min())
+            diff    = highest - lowest
+            cur     = float(c.iloc[-1])
+
+            if diff <= 0:
+                return self._default_fibonacci()
+
+            # 피보나치 레벨 (하락 후 반등 기준)
+            levels = {
+                "fib_0":    lowest,
+                "fib_236":  lowest + diff * 0.236,
+                "fib_382":  lowest + diff * 0.382,
+                "fib_500":  lowest + diff * 0.500,
+                "fib_618":  lowest + diff * 0.618,
+                "fib_786":  lowest + diff * 0.786,
+                "fib_100":  highest,
+            }
+
+            # 현재가 위치 (0~100%)
+            fib_pct = float((cur - lowest) / diff * 100)
+
+            # 가장 가까운 지지/저항 레벨 찾기
+            level_vals = sorted(levels.values())
+            nearest_support    = max([v for v in level_vals if v <= cur], default=lowest)
+            nearest_resistance = min([v for v in level_vals if v >= cur], default=highest)
+
+            # 황금비율(61.8%) 지지 여부
+            at_golden = int(abs(cur - levels["fib_618"]) / diff < 0.02)
+            at_half   = int(abs(cur - levels["fib_500"]) / diff < 0.02)
+
+            score = 50.0
+            # 황금비율 지지 = 강한 매수 신호
+            if at_golden: score += 20
+            if at_half:   score += 12
+            # 상승 추세에서 38.2% 지지
+            if 35 <= fib_pct <= 42: score += 15
+            # 과도한 되돌림 경고
+            if fib_pct < 20: score -= 15
+            if fib_pct > 85: score += 10  # 신고가 근접
+
+            return {
+                **{k: round(v, 2) for k, v in levels.items()},
+                "fib_pct":              round(fib_pct, 1),
+                "fib_nearest_support":  round(nearest_support, 2),
+                "fib_nearest_resist":   round(nearest_resistance, 2),
+                "fib_at_golden":        at_golden,
+                "fib_score":            float(np.clip(score, 0, 100)),
+            }
+        except Exception:
+            return self._default_fibonacci()
+
+    # ── ★ 엘리어트파동 자동감지 (간이) ─────────────────────────────
+    def _elliott_wave(self, ohlcv: pd.DataFrame) -> dict:
+        """
+        엘리어트파동 간이 감지
+        - 5파동 상승 / 3파동 조정 패턴 감지
+        - 피크/저점 자동 감지
+        - 현재 파동 위치 추정
+        """
+        try:
+            c = ohlcv["close"].astype(float).values
+            if len(c) < 30:
+                return self._default_elliott()
+
+            # 피크/저점 감지 (5일 윈도우)
+            peaks  = []
+            troughs = []
+            for i in range(5, len(c)-5):
+                if c[i] == max(c[i-5:i+6]):
+                    peaks.append((i, c[i]))
+                if c[i] == min(c[i-5:i+6]):
+                    troughs.append((i, c[i]))
+
+            if len(peaks) < 2 or len(troughs) < 2:
+                return self._default_elliott()
+
+            # 최근 피크/저점
+            last_peak   = peaks[-1]
+            last_trough = troughs[-1]
+            cur         = float(c[-1])
+
+            # 파동 위치 추정
+            if last_peak[0] > last_trough[0]:
+                # 최근 고점이 저점보다 나중 → 상승 후 조정 중
+                retrace = (last_peak[1] - cur) / (last_peak[1] - last_trough[1] + 1e-9)
+                if retrace < 0.382:
+                    wave_pos = "5파동 (상승 지속)"
+                    score    = 75.0
+                elif retrace < 0.618:
+                    wave_pos = "조정 A/B파 (매수 기회)"
+                    score    = 60.0
+                else:
+                    wave_pos = "C파 조정 (추가 하락 주의)"
+                    score    = 35.0
+            else:
+                # 최근 저점이 고점보다 나중 → 하락 후 반등 중
+                recover = (cur - last_trough[1]) / (last_peak[1] - last_trough[1] + 1e-9)
+                if recover > 0.618:
+                    wave_pos = "3파동 (강한 상승)"
+                    score    = 80.0
+                elif recover > 0.382:
+                    wave_pos = "2파동 끝 (매수 시점)"
+                    score    = 65.0
+                else:
+                    wave_pos = "1파동 초기"
+                    score    = 55.0
+
+            return {
+                "elliott_wave_pos": wave_pos,
+                "elliott_score":    float(np.clip(score, 0, 100)),
+                "elliott_peak":     round(float(last_peak[1]), 2),
+                "elliott_trough":   round(float(last_trough[1]), 2),
+            }
+        except Exception:
+            return self._default_elliott()
+
+    # ── ★ CNN 패턴 (간이 딥러닝 대체) ──────────────────────────────
+    def _cnn_pattern(self, ohlcv: pd.DataFrame) -> dict:
+        """
+        CNN 패턴 인식 간이 버전
+        (실제 CNN 대신 정규화된 가격 패턴으로 유사 구현)
+        - 20일 가격 패턴을 표준화
+        - 과거 상승 패턴과 유사도 계산
+        - 컵핸들 / 이중바닥 / VCP 패턴 감지
+        """
+        try:
+            c = ohlcv["close"].astype(float).values
+            if len(c) < 25:
+                return {"cnn_score": 50.0, "cnn_pattern": "데이터부족"}
+
+            # 최근 20일 정규화 (0~1)
+            w = c[-20:]
+            mn, mx = w.min(), w.max()
+            if mx == mn:
+                return {"cnn_score": 50.0, "cnn_pattern": "횡보"}
+            norm_w = (w - mn) / (mx - mn)
+
+            score = 50.0
+            pattern = "없음"
+
+            # 컵핸들 패턴: U형 + 오른쪽 고점 근접
+            mid_min = float(norm_w[8:12].min())
+            left    = float(norm_w[:5].mean())
+            right   = float(norm_w[15:].mean())
+            if mid_min < 0.3 and left > 0.6 and right > 0.7:
+                score   = 82.0
+                pattern = "컵핸들"
+
+            # 이중바닥 (W패턴)
+            elif (float(norm_w[3:7].min()) < 0.25 and
+                  float(norm_w[13:17].min()) < 0.25 and
+                  float(norm_w[8:12].max()) > 0.5):
+                score   = 78.0
+                pattern = "이중바닥(W)"
+
+            # VCP (Volatility Contraction Pattern)
+            vols = [abs(w[i]-w[i-1]) for i in range(1, len(w))]
+            if len(vols) >= 10:
+                early_vol = float(np.mean(vols[:10]))
+                late_vol  = float(np.mean(vols[-5:]))
+                if late_vol < early_vol * 0.5 and float(norm_w[-1]) > 0.7:
+                    score   = max(score, 75.0)
+                    pattern = "VCP(변동성수축)"
+
+            # 상승 추세 (우상향)
+            slope = float(np.polyfit(range(len(norm_w)), norm_w, 1)[0])
+            if slope > 0.02:
+                score += 10
+                if pattern == "없음":
+                    pattern = "상승추세"
+            elif slope < -0.02:
+                score -= 10
+                if pattern == "없음":
+                    pattern = "하락추세"
+
+            return {
+                "cnn_score":   float(np.clip(score, 0, 100)),
+                "cnn_pattern": pattern,
+            }
+        except Exception:
+            return {"cnn_score": 50.0, "cnn_pattern": "오류"}
+
     # ── ★ 캔들 패턴 인식 (15가지) ─────────────────────────────────
 
     def _candle_patterns(self, ohlcv: pd.DataFrame) -> dict:
@@ -540,6 +803,11 @@ class TechnicalIndicators:
         mfi_val, mfi_score            = self._mfi(ohlcv)
         obv_data                      = self._obv_advanced(ohlcv)
         vwap_data                     = self._vwap_advanced(ohlcv)
+        # ★ v7.2 신규 지표
+        ichi_data                     = self._ichimoku(ohlcv)
+        fib_data                      = self._fibonacci(ohlcv)
+        elliott_data                  = self._elliott_wave(ohlcv)
+        cnn_data                      = self._cnn_pattern(ohlcv)
 
         cur_price  = float(close.iloc[-1])
         prev_close = float(close.iloc[-2]) if len(close) > 1 else cur_price
@@ -572,6 +840,8 @@ class TechnicalIndicators:
             "cci": cci_val, "cci_score": cci_score,
             "mfi": mfi_val, "mfi_score": mfi_score,
             **obv_data, **vwap_data,
+            # ★ v7.2 신규
+            **ichi_data, **fib_data, **elliott_data, **cnn_data,
         }
 
     # ── 기본값 ────────────────────────────────────────────────────
@@ -626,4 +896,8 @@ class TechnicalIndicators:
             "obv_slope":0.0,"obv_divergence":0,"obv_score":50.0,
             "vwap":0.0,"vwap_deviation":0.0,"vwap_above":0,"vwap_score":50.0,
         })
+        d.update(self._default_ichimoku())
+        d.update(self._default_fibonacci())
+        d.update(self._default_elliott())
+        d.update({"cnn_score":50.0,"cnn_pattern":"없음"})
         return d

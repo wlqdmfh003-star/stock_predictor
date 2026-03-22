@@ -216,7 +216,12 @@ class KISApi:
         return {"prog_net":prog_net,"prog_score":prog_score}
 
     # ── 기관/외인 수급 ──────────────────────────────────────────────────────
-    def get_investor_trend(self, code: str, days: int=5) -> dict:
+    def get_investor_trend(self, code: str, days: int=10) -> dict:
+        """
+        기관/외국인 수급 + 외국인 누적 추이 분석
+        ★ 5일 연속 외국인 순매수 = 강한 매수 신호
+        ★ 외국인 누적 방향성 (증가/감소 추세)
+        """
         end   = datetime.now().strftime("%Y%m%d")
         start = (datetime.now()-timedelta(days=days+5)).strftime("%Y%m%d")
         d     = self._get("/uapi/domestic-stock/v1/quotations/inquire-investor",
@@ -226,15 +231,55 @@ class KISApi:
                            "FID_ETC_CLS_CODE":""})
         output = d.get("output",[])
         if not output:
-            return {"inst_net":0,"foreign_net":0,"inst_score":50}
+            return {"inst_net":0,"foreign_net":0,"inst_score":50,
+                    "foreign_consec":0,"foreign_trend":0,"foreign_trend_score":50}
+
         inst_net    = sum(int(i.get("orgn_ntby_qty",0)  or 0) for i in output)
         foreign_net = sum(int(i.get("frgn_ntby_qty",0)  or 0) for i in output)
         inst_amt    = sum(int(i.get("orgn_ntby_tr_pbmn",0) or 0) for i in output)
         frgn_amt    = sum(int(i.get("frgn_ntby_tr_pbmn",0) or 0) for i in output)
-        # 기관/외인 순매수 기반 점수
+
+        # ★ 외국인 일별 순매수 추이 분석
+        frgn_daily = [int(i.get("frgn_ntby_qty",0) or 0) for i in output]
+
+        # 연속 순매수/순매도 일수
+        consec = 0
+        for v in reversed(frgn_daily):
+            if v > 0: consec += 1
+            elif v < 0:
+                if consec == 0: consec = -1
+                else: break
+            else: break
+
+        # 5일 추세 (선형회귀 기울기)
+        if len(frgn_daily) >= 5:
+            x = np.arange(len(frgn_daily[-5:]))
+            trend = float(np.polyfit(x, frgn_daily[-5:], 1)[0])
+        else:
+            trend = 0.0
+
+        # 외국인 추이 점수
+        ft_score = 50.0
+        if consec >= 5:   ft_score += 25   # 5일 연속 순매수
+        elif consec >= 3: ft_score += 15
+        elif consec >= 1: ft_score += 8
+        elif consec <= -5: ft_score -= 25  # 5일 연속 순매도
+        elif consec <= -3: ft_score -= 15
+        elif consec <= -1: ft_score -= 8
+        if trend > 0:     ft_score += 8
+        elif trend < 0:   ft_score -= 8
+
         inst_score = float(np.clip(50+(inst_amt+frgn_amt*0.5)/1e7, 0, 100))
-        return {"inst_net":inst_net,"foreign_net":foreign_net,
-                "inst_amt":inst_amt,"frgn_amt":frgn_amt,"inst_score":inst_score}
+        return {
+            "inst_net":           inst_net,
+            "foreign_net":        foreign_net,
+            "inst_amt":           inst_amt,
+            "frgn_amt":           frgn_amt,
+            "inst_score":         inst_score,
+            "foreign_consec":     consec,       # 연속 순매수(+)/순매도(-) 일수
+            "foreign_trend":      round(trend, 2),  # 추이 기울기
+            "foreign_trend_score":float(np.clip(ft_score, 0, 100)),
+        }
 
     # ── 전체 DataFrame 수급 + 호가 적용 ────────────────────────────────────
     def get_institution_data(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -263,15 +308,18 @@ class KISApi:
 
         df = df.copy()
         for col, key, default in [
-            ("inst_net",       "inst_net",       0),
-            ("foreign_net",    "foreign_net",    0),
-            ("institution_score","inst_score",   50),
-            ("ob_score",       "ob_score",       50),
-            ("ts_score",       "ts_score",       50),
-            ("ob_pressure",    "ob_pressure",    1.0),
-            ("buy_wall",       "buy_wall",       1.0),
-            ("sell_wall",      "sell_wall",      1.0),
-            ("trade_strength", "trade_strength", 100),
+            ("inst_net",             "inst_net",             0),
+            ("foreign_net",          "foreign_net",          0),
+            ("institution_score",    "inst_score",           50),
+            ("ob_score",             "ob_score",             50),
+            ("ts_score",             "ts_score",             50),
+            ("ob_pressure",          "ob_pressure",          1.0),
+            ("buy_wall",             "buy_wall",             1.0),
+            ("sell_wall",            "sell_wall",            1.0),
+            ("trade_strength",       "trade_strength",       100),
+            ("foreign_consec",       "foreign_consec",       0),
+            ("foreign_trend",        "foreign_trend",        0.0),
+            ("foreign_trend_score",  "foreign_trend_score",  50),
         ]:
             df[col] = df["code"].map(lambda c: results.get(c,{}).get(key, default))
 

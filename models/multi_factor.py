@@ -80,18 +80,26 @@ class MultiFactorScorer:
         ) / tw
 
         # RSI/MACD 보조
-        # ★ 새 지표 점수 추가 (스토캐스틱/CCI/MFI/OBV/VWAP)
-        for col in ["stoch_score","cci_score","mfi_score","obv_score","vwap_score"]:
+        # ★ 새 지표 점수 추가 (스토캐스틱/CCI/MFI/OBV/VWAP + 일목/피보/엘리어트/CNN)
+        for col in ["stoch_score","cci_score","mfi_score","obv_score","vwap_score",
+                    "ichi_score","fib_score","elliott_score","cnn_score"]:
             if col not in df.columns:
                 df[col] = 50.0
 
+        # ★ IC 기반 동적 가중치 계산
+        ic_weights = self._calc_ic_weights(df)
+
         df["total_score"] = (
-            df["total_score"] * 0.75 +
-            norm("stoch_score") * 0.05 +
-            norm("cci_score")   * 0.05 +
-            norm("mfi_score")   * 0.05 +
-            norm("obv_score")   * 0.05 +
-            norm("vwap_score")  * 0.05 +
+            df["total_score"] * 0.65 +
+            norm("stoch_score")   * ic_weights.get("stoch",   0.03) +
+            norm("cci_score")     * ic_weights.get("cci",     0.03) +
+            norm("mfi_score")     * ic_weights.get("mfi",     0.03) +
+            norm("obv_score")     * ic_weights.get("obv",     0.03) +
+            norm("vwap_score")    * ic_weights.get("vwap",    0.03) +
+            norm("ichi_score")    * ic_weights.get("ichi",    0.05) +
+            norm("fib_score")     * ic_weights.get("fib",     0.04) +
+            norm("elliott_score") * ic_weights.get("elliott", 0.04) +
+            norm("cnn_score")     * ic_weights.get("cnn",     0.07) +
             df["f_rsi"]        * 0.10 +
             df["f_macd"]       * 0.08
         )
@@ -104,6 +112,18 @@ class MultiFactorScorer:
 
         # 요일/월말 효과 반영
         df["total_score"] = (df["total_score"] + df["calendar_bonus"]).clip(0,100)
+
+        # ★ 외국인 순매수 추이 반영
+        if "foreign_trend_score" in df.columns:
+            ft = df["foreign_trend_score"].astype(float)
+            df["total_score"] = (df["total_score"] * 0.93 +
+                                 ft * 0.07).clip(0, 100)
+
+        # ★ 공시 발표 전날 전략 반영
+        if "pre_disclosure_score" in df.columns:
+            pd_s = df["pre_disclosure_score"].astype(float)
+            bonus = ((pd_s - 50) / 50 * 5).clip(-3, 8)
+            df["total_score"] = (df["total_score"] + bonus).clip(0, 100)
 
         # ★ 섹터 로테이션 가중치 반영
         try:

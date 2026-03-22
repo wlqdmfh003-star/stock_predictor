@@ -228,3 +228,45 @@ class DartDisclosure:
                 except Exception:
                     continue
         return None
+
+    def _pre_disclosure_score(self, row) -> float:
+        """
+        공시 발표 전날 매수 전략
+        - 실적 발표일 전날 → 어닝서프라이즈 기대감
+        - 자사주 취득 공시 후 → 추가 상승 기대
+        - 배당 기준일 전날 → 배당 수익 기대
+        """
+        from datetime import datetime, timedelta
+        score = 50.0
+
+        try:
+            disclosure = str(row.get("dart_disclosure", ""))
+            dart_score = float(row.get("dart_score", 50))
+            earnings   = str(row.get("earnings_note", ""))
+
+            # 어닝서프라이즈 기대 (실적 발표 임박)
+            if "발표" in earnings or "예정" in earnings:
+                score += 12
+
+            # 자사주 취득 공시 → 2~3일 추가 상승 경향
+            if "자사주취득" in disclosure or "자기주식취득" in disclosure:
+                score += 15
+
+            # 자사주 소각 공시 → 강한 추가 상승
+            if "자사주소각" in disclosure or "자기주식소각" in disclosure:
+                score += 20
+
+            # 배당 관련 (배당락 전날 매수)
+            if "배당" in disclosure:
+                score += 8
+
+            # DART 점수 높으면 추가 보너스
+            if dart_score >= 70:
+                score += 10
+            elif dart_score <= 35:
+                score -= 10
+
+        except Exception:
+            pass
+
+        return float(np.clip(score, 0, 100))

@@ -384,6 +384,9 @@ if analyze_btn:
             "option_strategy":"옵션전략","sector_rotation":"섹터로테이션",
             "earnings_note":"실적일정","stoch_k":"스토캐스틱K",
             "cci":"CCI","mfi":"MFI","vwap_deviation":"VWAP이탈(%)",
+            "foreign_consec":"외국인연속(일)","ichi_score":"일목점수",
+            "fib_score":"피보나치점수","elliott_wave_pos":"엘리어트파동",
+            "cnn_pattern":"차트패턴","cnn_score":"패턴점수",
         }
 
         df_disp=df.drop(columns=["ohlcv","ohlcv_weekly","ohlcv_monthly"],errors="ignore").copy()

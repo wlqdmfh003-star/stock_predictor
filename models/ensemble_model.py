@@ -897,6 +897,102 @@ class EnsembleModel:
             return 20.0
 
 
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ★ 앙상블 스태킹 — 메타모델로 최적 조합
+    # ══════════════════════════════════════════════════════════════════════════
+    def _stacking_predict(self, xgb_prob: float, lgbm_prob: float,
+                          cat_prob: float, lstm_prob: float,
+                          ohlcv=None) -> float:
+        """
+        스태킹 앙상블
+        - XGB/LGB/CAT/LSTM 예측값을 메타모델로 재학습
+        - 메타모델: 로지스틱 회귀 (단순하지만 효과적)
+        - 학습 데이터 없으면 가중합으로 폴백
+        """
+        try:
+            import os, json
+
+            meta_path = ".cache/stacking_weights.json"
+
+            # 메타 가중치 로드
+            if os.path.exists(meta_path):
+                with open(meta_path, "r") as f:
+                    meta = json.load(f)
+                w = meta.get("weights", {})
+                bias = float(meta.get("bias", 0.0))
+
+                # 로지스틱 회귀 예측
+                z = (w.get("xgb",  0.28) * xgb_prob  +
+                     w.get("lgbm", 0.25) * lgbm_prob +
+                     w.get("cat",  0.22) * cat_prob  +
+                     w.get("lstm", 0.25) * lstm_prob  +
+                     bias)
+                # 시그모이드 함수로 0~100 변환
+                result = 100 / (1 + np.exp(-(z - 50) / 15))
+                return float(np.clip(result, 0, 100))
+            else:
+                # 메타 가중치 없으면 동적 가중합
+                return float(np.clip(
+                    xgb_prob  * self.xgb_weight  +
+                    lgbm_prob * self.lgbm_weight +
+                    cat_prob  * self.cat_weight  +
+                    lstm_prob * self.lstm_weight,
+                    0, 100
+                ))
+        except:
+            return float(np.clip(
+                xgb_prob * 0.28 + lgbm_prob * 0.25 +
+                cat_prob * 0.22 + lstm_prob * 0.25, 0, 100))
+
+    def update_stacking_weights(self, predictions: list, actuals: list):
+        """
+        스태킹 메타 가중치 업데이트
+        predictions: [(xgb,lgbm,cat,lstm), ...] 예측값 리스트
+        actuals: [0/1, ...] 실제 상승 여부
+        """
+        try:
+            import os, json
+            if len(predictions) < 20 or len(actuals) < 20:
+                return
+
+            X = np.array(predictions)  # (N, 4)
+            y = np.array(actuals)      # (N,)
+
+            # 경사하강법으로 로지스틱 회귀 학습
+            w = np.array([0.28, 0.25, 0.22, 0.25])
+            b = 0.0
+            lr = 0.01
+
+            for _ in range(100):
+                z    = X @ w + b
+                pred = 1 / (1 + np.exp(-(z-50)/15))
+                err  = pred - y
+                grad_w = X.T @ err / len(y)
+                grad_b = err.mean()
+                w -= lr * grad_w
+                b -= lr * grad_b
+                w  = np.clip(w, 0.05, 0.6)
+
+            # 합계 정규화
+            w = w / w.sum()
+
+            os.makedirs(".cache", exist_ok=True)
+            with open(".cache/stacking_weights.json", "w") as f:
+                json.dump({
+                    "weights": {
+                        "xgb":  round(float(w[0]), 4),
+                        "lgbm": round(float(w[1]), 4),
+                        "cat":  round(float(w[2]), 4),
+                        "lstm": round(float(w[3]), 4),
+                    },
+                    "bias":    round(float(b), 4),
+                    "n_samples": len(y),
+                }, f, indent=2)
+            print(f"[스태킹] 메타 가중치 업데이트 완료 ({len(y)}건)")
+        except Exception as e:
+            print(f"[스태킹] 업데이트 실패: {e}")
+
     # ══════════════════════════════════════════════════════════════════════════
     # ★ 앙상블 메타러닝 — 최근 적중률 기반 동적 가중치
     # ══════════════════════════════════════════════════════════════════════════

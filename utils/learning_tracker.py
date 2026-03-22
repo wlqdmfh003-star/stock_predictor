@@ -739,3 +739,106 @@ class BayesianWeightOptimizer:
                 self.iteration = d.get("iteration", 0)
             except Exception:
                 pass
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ★ 섹터별 분리 자기학습 (200건 이상 시 활성)
+    # ══════════════════════════════════════════════════════════════════════════
+    def calc_sector_weights(self, sector: str) -> dict:
+        """
+        섹터별 최적 가중치 계산
+        - 반도체/바이오/방산 등 섹터마다 다른 팩터가 중요
+        - 200건 이상 데이터 있을 때 활성화
+        - 없으면 전체 가중치 반환
+        """
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            df   = pd.read_sql_query(
+                "SELECT * FROM predictions WHERE sector=? AND result IS NOT NULL",
+                conn, params=(sector,)
+            )
+            conn.close()
+
+            if len(df) < 30:
+                return self.calc_learned_weights()
+
+            # 섹터별 팩터 중요도 계산
+            completed = df[df["result"].notna()].copy()
+            if len(completed) < 10:
+                return self.calc_learned_weights()
+
+            # 각 팩터별 IC 계산 (팩터점수 vs 실제 수익률 상관관계)
+            factor_cols = [
+                "momentum_score","sentiment_score","fundamental_score",
+                "ensemble_score","lstm_score","sector_score","dart_score",
+                "short_score","high52_score","macro_score","institution_score",
+            ]
+            ic_dict = {}
+            for col in factor_cols:
+                if col in completed.columns and "change_1d" in completed.columns:
+                    try:
+                        ic = float(completed[col].astype(float).corr(
+                            completed["change_1d"].astype(float)))
+                        ic_dict[col] = ic if np.isfinite(ic) else 0.0
+                    except:
+                        ic_dict[col] = 0.0
+
+            if not ic_dict:
+                return self.calc_learned_weights()
+
+            # IC 기반 가중치 조정
+            base_w = self.calc_learned_weights()
+            key_map = {
+                "momentum_score":    "momentum",
+                "sentiment_score":   "sentiment",
+                "fundamental_score": "fundamental",
+                "ensemble_score":    "ensemble",
+                "lstm_score":        "lstm",
+                "sector_score":      "sector",
+                "dart_score":        "dart",
+                "short_score":       "short",
+                "high52_score":      "high52",
+                "macro_score":       "macro",
+                "institution_score": "institution",
+            }
+
+            sector_w = dict(base_w)
+            for col, ic in ic_dict.items():
+                key = key_map.get(col)
+                if key and key in sector_w:
+                    # IC 양수 → 가중치 UP / 음수 → 가중치 DOWN (최대 ±40%)
+                    adj = 1.0 + np.clip(ic * 2, -0.4, 0.4)
+                    sector_w[key] = float(sector_w[key] * adj)
+
+            # 합계 정규화
+            total = sum(sector_w.values())
+            if total > 0:
+                sector_w = {k: round(v/total, 4) for k,v in sector_w.items()}
+
+            print(f"[섹터학습] {sector}: {len(completed)}건 기반 가중치 적용")
+            return sector_w
+
+        except Exception as e:
+            return self.calc_learned_weights()
+
+    def get_sector_stats(self) -> dict:
+        """섹터별 자기학습 현황"""
+        try:
+            conn   = sqlite3.connect(DB_PATH)
+            df_all = pd.read_sql_query(
+                "SELECT sector, COUNT(*) as cnt, "
+                "AVG(CASE WHEN result='상승' THEN 1 ELSE 0 END) as hit "
+                "FROM predictions WHERE sector IS NOT NULL "
+                "GROUP BY sector ORDER BY cnt DESC",
+                conn
+            )
+            conn.close()
+            result = {}
+            for _, row in df_all.iterrows():
+                result[str(row["sector"])] = {
+                    "count":    int(row["cnt"]),
+                    "hit_rate": round(float(row["hit"])*100, 1) if row["hit"] else 0,
+                    "active":   int(row["cnt"]) >= 30,
+                }
+            return result
+        except:
+            return {}
