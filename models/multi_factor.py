@@ -420,6 +420,56 @@ class MultiFactorScorer:
         elif rsi<70: return 40.0
         else:        return 25.0
 
+
+    def _calc_ic_weights(self, df: pd.DataFrame) -> dict:
+        """
+        팩터 IC(Information Coefficient) 기반 동적 가중치
+        - 각 팩터의 최근 예측력 측정
+        - IC 높은 팩터 가중치 UP / 낮은 팩터 DOWN
+        - 데이터 부족 시 기본값 반환
+        """
+        base = {
+            "stoch":0.03,"cci":0.03,"mfi":0.03,
+            "obv":0.03,"vwap":0.03,"ichi":0.05,
+            "fib":0.04,"elliott":0.04,"cnn":0.07,
+        }
+        col_map = {
+            "stoch":   "stoch_score",
+            "cci":     "cci_score",
+            "mfi":     "mfi_score",
+            "obv":     "obv_score",
+            "vwap":    "vwap_score",
+            "ichi":    "ichi_score",
+            "fib":     "fib_score",
+            "elliott": "elliott_score",
+            "cnn":     "cnn_score",
+        }
+        try:
+            if "mom_5d" not in df.columns or len(df) < 10:
+                return base
+            ret = df["mom_5d"].astype(float)
+            total_base = sum(base.values())
+            weights = {}
+            for key, col in col_map.items():
+                if col not in df.columns:
+                    weights[key] = base[key]
+                    continue
+                factor = df[col].astype(float)
+                try:
+                    corr = float(factor.rank().corr(ret.rank()))
+                    ic   = corr if np.isfinite(corr) else 0.0
+                except Exception:
+                    ic = 0.0
+                adj = 1.0 + np.clip(ic * 2, -0.5, 0.5)
+                weights[key] = base[key] * adj
+            total = sum(weights.values())
+            if total > 0:
+                factor = total_base / total
+                weights = {k: round(v * factor, 4) for k, v in weights.items()}
+            return weights
+        except Exception:
+            return base
+
     def _to_prob(self, score):
         x = (score-50)/15
         return float(np.clip(1/(1+np.exp(-x))*100, 35, 92))
