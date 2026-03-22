@@ -48,7 +48,8 @@ class MultiFactorScorer:
         df["f_lstm"]        = norm("lstm_score")
         df["f_ensemble"]    = norm("ensemble_score")
         df["f_candle"]      = df["candle_score"].clip(0,100)
-        df["f_macro"]       = norm("macro_score")
+        # ★ macro_score는 원래값 사용 (norm하면 차이 왜곡됨)
+        df["f_macro"] = df["macro_score"].astype(float).clip(0, 100) if "macro_score" in df.columns else pd.Series(50.0, index=df.index)
         df["f_momentum"]    = norm("momentum_score")
         df["f_sentiment"]   = norm("sentiment_score")
         df["f_institution"] = self._institution_score(df)
@@ -58,7 +59,8 @@ class MultiFactorScorer:
         df["f_short"]       = norm("short_score")
         df["f_high52"]      = norm("high52_score")
         df["f_us_market"]   = norm("us_market_score")
-        df["f_sector"]      = norm("sector_score")
+        # ★ sector_score도 원래값 사용
+        df["f_sector"] = df["sector_score"].astype(float).clip(0, 100) if "sector_score" in df.columns else pd.Series(50.0, index=df.index)
         df["f_rsi"]         = df["rsi"].apply(self._rsi_score)
         df["f_macd"]        = df["macd_cross"].fillna(0)*20+50
 

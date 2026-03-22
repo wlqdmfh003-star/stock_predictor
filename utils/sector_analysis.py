@@ -103,16 +103,25 @@ class SectorAnalysis:
             "POSCO홀딩스","현대제철","고려아연","풍산","세아베스틸",
             "동국제강","KG스틸","포스코스틸리온","세아특수강","성일하이텍",
             "영풍","고려제강","동원시스템즈","화성밸브","태웅",
+            "포스코","POSCO","LS머트리얼즈","LS","LS전선","LS일렉트릭",
+            "풍산홀딩스","서원","대창","한국철강","동일제강",
         ],
         "건설/부동산": [
             "삼성물산","현대건설","GS건설","DL이앤씨","HDC현대산업개발",
             "대우건설","태영건설","호반건설","신세계건설","효성중공업",
             "두산건설","코오롱글로벌","한신공영","계룡건설","동부건설",
+            # ★ 추가
+            "서희건설","일성건설","금호건설","한라","중흥건설",
+            "HJ중공업","SH공사","KCC건설","우미건설","반도건설",
+            "아이에스동서","대방건설","모아건설","SM상선","세보엠이씨",
+            "흥구석유","SGC에너지","보성파워텍","화성밸브","에스와이",
         ],
         "에너지": [
             "SK이노베이션","S-Oil","GS","한국전력","한국가스공사",
             "SK가스","E1","한국지역난방공사","STX에너지솔루션","에스에너지",
             "한화솔루션","OCI","신성이엔지","에스와이","SK오케이",
+            "두산에너빌리티","두산퓨얼셀","한전기술","한전KPS","우진",
+            "비에이치아이","보성파워텍","대창솔루션","에스에너지",
         ],
         "엔터/미디어": [
             "하이브","에스엠","JYP","와이지엔터테인먼트","카카오엔터",
@@ -124,6 +133,13 @@ class SectorAnalysis:
             "레인보우로보틱스","두산로보틱스","현대로보틱스","유진로봇",
             "로보티즈","티로보틱스","에스피지","나인봇","클로봇",
             "원익로보틱스","한화로보틱스","도구공간","뉴로메카","한컴로보틱스",
+        ],
+        "운송/물류": [
+            "대한항공","아시아나항공","제주항공","진에어","에어부산",
+            "티웨이항공","에어서울","이스타항공","플라이강원",
+            "CJ대한통운","한진","한진칼","롯데글로벌로지스","세방",
+            "현대글로비스","HMM","팬오션","대한해운","흥아해운",
+            "위너스","SG글로벌","유수홀딩스","천일고속",
         ],
         "ETF/인덱스": [
             "KODEX","TIGER","KBSTAR","ARIRANG","HANARO",
@@ -139,15 +155,104 @@ class SectorAnalysis:
             "에이피알","아모레퍼시픽","LG생활건강","코스맥스","한국콜마",
             "클리오","토니모리","잇츠한불","에이블씨엔씨","애경산업",
             "파마리서치프로","브이티","실리콘투","네오팜","제이준코스메틱",
+            "스킨푸드","더마펌","코스메카코리아","씨앤씨인터내셔널",
+            "마녀공장","에이피알","퍼블리시스","APR","연우",
         ],
+    }
+
+    # ★ yfinance 영문 sector → 한국어 변환 테이블
+    YF_SECTOR_MAP = {
+        "Technology":             "반도체",
+        "Communication Services": "IT/플랫폼",
+        "Consumer Cyclical":      "유통/소비",
+        "Consumer Defensive":     "유통/소비",
+        "Healthcare":             "바이오/제약",
+        "Financial Services":     "금융",
+        "Financial":              "금융",
+        "Basic Materials":        "철강/소재",
+        "Materials":              "철강/소재",
+        "Energy":                 "에너지",
+        "Utilities":              "에너지",
+        "Real Estate":            "건설/부동산",
+        "Industrials":            "운송/물류",
+        "Consumer":               "유통/소비",
+    }
+
+    YF_INDUSTRY_MAP = {
+        "Semiconductors":                     "반도체",
+        "Semiconductor Equipment & Materials": "반도체",
+        "Electronic Components":              "반도체",
+        "Scientific & Technical Instruments": "반도체",
+        "Consumer Electronics":               "IT/플랫폼",
+        "Software—Application":               "IT/플랫폼",
+        "Internet Content & Information":     "IT/플랫폼",
+        "Electronic Gaming & Multimedia":     "IT/플랫폼",
+        "Auto Manufacturers":                 "자동차/부품",
+        "Auto Parts":                         "자동차/부품",
+        "Drug Manufacturers—General":         "바이오/제약",
+        "Drug Manufacturers—Specialty & Generic": "바이오/제약",
+        "Biotechnology":                      "바이오/제약",
+        "Medical Devices":                    "바이오/제약",
+        "Medical Instruments & Supplies":     "바이오/제약",
+        "Diagnostics & Research":             "바이오/제약",
+        "Banks—Regional":                     "금융",
+        "Banks—Diversified":                  "금융",
+        "Insurance—Life":                     "금융",
+        "Insurance—Diversified":              "금융",
+        "Capital Markets":                    "금융",
+        "Asset Management":                   "금융",
+        "Steel":                              "철강/소재",
+        "Aluminum":                           "철강/소재",
+        "Copper":                             "철강/소재",
+        "Chemicals":                          "화학",
+        "Specialty Chemicals":                "화학",
+        "Oil & Gas Integrated":               "에너지",
+        "Oil & Gas Refining & Marketing":     "에너지",
+        "Oil & Gas E&P":                      "에너지",
+        "Utilities—Regulated Electric":       "에너지",
+        "Utilities—Renewable":                "에너지",
+        "Aerospace & Defense":                "방산",
+        "Residential Construction":           "건설/부동산",
+        "Engineering & Construction":         "건설/부동산",
+        "Entertainment":                      "엔터/미디어",
+        "Shipping & Ports":                   "운송/물류",
+        "Airlines":                           "운송/물류",
+        "Trucking":                           "운송/물류",
+        "Marine Shipping":                    "조선",
+        "Shipbuilding":                       "조선",
+        "Specialty Industrial Machinery":     "로봇/자동화",
+        "Farm & Heavy Construction Machinery":"로봇/자동화",
+        "Electrical Equipment & Parts":       "IT/플랫폼",
+        "Telecom Services":                   "IT/플랫폼",
+        "Grocery Stores":                     "유통/소비",
+        "Discount Stores":                    "유통/소비",
+        "Apparel Retail":                     "유통/소비",
+        "Apparel Manufacturing":              "유통/소비",
+        "Packaged Foods":                     "유통/소비",
+        "Beverages—Brewers":                  "유통/소비",
+        "Lodging":                            "유통/소비",
+        "Travel Services":                    "유통/소비",
+        "Recreational Vehicles":              "자동차/부품",
+        "Secondary storage":                  "반도체",
+        "Computer Hardware":                  "반도체",
     }
 
     def __init__(self):
         self.today = datetime.now().strftime("%Y%m%d")
+        # yfinance 섹터 캐시 (코드 → 한국어 섹터)
+        self._yf_sector_cache: dict = {}
 
     def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
-        df["sector"] = df["name"].apply(self._get_sector)
+        # ★ yfinance 섹터 자동 수집 (코드 기반)
+        self._fetch_yf_sectors(df)
+        # 섹터 결정: yfinance 캐시 우선 → 수동 사전 폴백
+        df["sector"] = df.apply(
+            lambda row: self._get_sector_smart(
+                str(row.get("code","")),
+                str(row.get("name",""))
+            ), axis=1
+        )
 
         # 섹터별 5일/20일 모멘텀 계산 (로테이션 감지)
         sector_stats = self._calc_sector_stats(df)
@@ -185,6 +290,41 @@ class SectorAnalysis:
                 return sector
 
         return "기타"
+
+    def _fetch_yf_sectors(self, df: pd.DataFrame):
+        """yfinance로 섹터 자동 수집 (캐시 사용)"""
+        try:
+            import yfinance as yf
+            codes = df["code"].tolist() if "code" in df.columns else []
+            for code in codes:
+                code = str(code)
+                if not code or code in self._yf_sector_cache:
+                    continue
+                for suffix in [".KS", ".KQ"]:
+                    try:
+                        info = yf.Ticker(f"{code}{suffix}").info
+                        if not info:
+                            continue
+                        sector_en   = info.get("sector",   "") or ""
+                        industry_en = info.get("industry", "") or ""
+                        # industry 우선 (더 정밀) → sector 폴백
+                        kor = (self.YF_INDUSTRY_MAP.get(industry_en) or
+                               self.YF_SECTOR_MAP.get(sector_en) or "")
+                        if kor:
+                            self._yf_sector_cache[code] = kor
+                            break
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    def _get_sector_smart(self, code: str, name: str) -> str:
+        """yfinance 캐시 1순위 → 수동 사전 2순위"""
+        # 1순위: yfinance 캐시
+        if code and code in self._yf_sector_cache:
+            return self._yf_sector_cache[code]
+        # 2순위: 수동 사전
+        return self._get_sector(name)
 
     def _calc_sector_stats(self, df: pd.DataFrame) -> dict:
         """섹터별 5일/20일 모멘텀 비교 → 로테이션 신호 생성"""

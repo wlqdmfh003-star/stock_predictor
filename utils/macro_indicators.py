@@ -180,6 +180,11 @@ class MacroIndicators:
                 score += np.clip((oil_val - 70) * 0.2, -8, 10)
                 score += np.clip(-dxy_chg * 1.5, -6, 8)
 
+            # 운송/물류: 유가 + 달러 영향
+            elif sector == "운송/물류":
+                score += np.clip(-(oil_val - 70) * 0.2, -8, 8)
+                score += np.clip(-dxy_chg * 2, -6, 8)
+
             # ★ 기타 섹터도 종목명으로 차별화
             else:
                 # 전자/IT 계열
