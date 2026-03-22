@@ -11,7 +11,10 @@ on:
 jobs:
   run-prediction:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 110
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
     - name: 코드 받기
@@ -62,7 +65,7 @@ jobs:
 
         # 데이터 수집
         from utils.data_fetcher import DataFetcher
-        df = DataFetcher(market='KOSPI+KOSDAQ', top_n=200).fetch_all_parallel()
+        df = DataFetcher(market='KOSPI+KOSDAQ', top_n=100).fetch_all_parallel()
         print(f'종목 수집: {len(df)}개')
 
         # 기술적 지표
