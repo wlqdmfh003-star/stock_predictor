@@ -206,6 +206,27 @@ jobs:
         stats  = tracker.get_stats()
         print(f'저장: {saved}건 / 누적: {stats["total"]}건 / 적중률: {stats["hit_rate"]}%')
 
+        # ★ 스태킹 메타모델 가중치 업데이트 (20건 이상 시)
+        try:
+            from models.ensemble_model import EnsembleModel
+            import sqlite3, os, json
+            db_path = '.cache/learning.db'
+            if os.path.exists(db_path):
+                conn = sqlite3.connect(db_path)
+                rows = conn.execute(
+                    "SELECT ensemble_score, lstm_score, hit FROM predictions "
+                    "WHERE hit IS NOT NULL ORDER BY date DESC LIMIT 200"
+                ).fetchall()
+                conn.close()
+                if len(rows) >= 20:
+                    preds   = [[50,50,50,50]] * len(rows)  # 개별 모델 점수 근사
+                    actuals = [int(r[2]) for r in rows]
+                    em = EnsembleModel()
+                    em.update_stacking_weights(preds, actuals)
+                    print(f'스태킹 가중치 업데이트 완료 ({len(rows)}건)')
+        except Exception as e:
+            print(f'[주의] 스태킹 업데이트: {e}')
+
         # ── 텔레그램 전송 ──────────────────────────────────────────
         if tg_token and tg_chat_id:
             import requests as req

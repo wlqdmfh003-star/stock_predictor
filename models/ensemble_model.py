@@ -1216,6 +1216,15 @@ class EnsembleModel:
             base_score = float(np.clip(
                 (lstm_prob*lw + xgb_prob*xw + lgbm_prob*gw + cat_prob*cw) / tw,
                 0, 100))
+            # ★ 스태킹 메타모델 적용 (학습 데이터 있으면)
+            try:
+                stacking_score = self._stacking_predict(
+                    xgb_prob, lgbm_prob, cat_prob, lstm_prob, ohlcv)
+                # 스태킹 30% + 기존 70% 블렌딩
+                base_score = float(np.clip(
+                    base_score * 0.70 + stacking_score * 0.30, 0, 100))
+            except Exception:
+                pass  # 스태킹 실패 시 기존 값 유지
         else:
             base_score = float(np.clip(lstm_prob*0.5 + rule_prob*0.5, 0, 100))
 

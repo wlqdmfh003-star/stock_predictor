@@ -33,6 +33,23 @@ class MultiFactorScorer:
         w  = self.weights
         tw = sum(w.values()) or 1.0
 
+        # ★ 섹터별 분리학습 가중치 적용 (200건 이상 시 자동 활성)
+        try:
+            from utils.learning_tracker import LearningTracker
+            lt = LearningTracker()
+            stats = lt.get_stats()
+            if stats.get("total", 0) >= 200 and "sector" in df.columns:
+                # 가장 많은 섹터의 학습된 가중치 사용
+                sector_counts = df["sector"].value_counts()
+                if len(sector_counts) > 0:
+                    top_sector = sector_counts.index[0]
+                    sector_w   = lt.calc_sector_weights(top_sector)
+                    if sector_w and len(sector_w) > 0:
+                        w  = sector_w
+                        tw = sum(w.values()) or 1.0
+        except Exception:
+            pass
+
         def norm(col):
             s  = df[col].astype(float)
             mn = s.min()
