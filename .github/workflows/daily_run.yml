@@ -206,14 +206,94 @@ jobs:
         stats  = tracker.get_stats()
         print(f'저장: {saved}건 / 누적: {stats["total"]}건 / 적중률: {stats["hit_rate"]}%')
 
-        # 텔레그램 TOP5
+        # ── 텔레그램 전송 ──────────────────────────────────────────
         if tg_token and tg_chat_id:
             import requests as req
             from datetime import datetime
 
+            def send_tg(msg):
+                url = f'https://api.telegram.org/bot{tg_token}/sendMessage'
+                try:
+                    resp = req.post(url, json={
+                        'chat_id': tg_chat_id,
+                        'text': msg,
+                        'parse_mode': 'HTML'
+                    }, timeout=10)
+                    return resp.status_code
+                except Exception as e:
+                    print(f'텔레그램 전송 실패: {e}')
+                    return 0
+
             today = datetime.now().strftime('%Y-%m-%d')
+            hour  = datetime.now().hour
+
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # ① 장 시작 알림 개선 (06:30 전송)
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            market_header = []
+
+            # 시장 국면
+            try:
+                from utils.market_phase import MarketPhase
+                pr = MarketPhase().detect(market='KOSPI')
+                phase_name = pr[0] if isinstance(pr, tuple) else str(pr)
+                phase_icon = '🚀' if '강세' in phase_name else '🛡️' if '약세' in phase_name else '➡️'
+                market_header.append(f'{phase_icon} 시장국면: {phase_name}')
+            except Exception:
+                market_header.append('➡️ 시장국면: 분석중')
+
+            # 공포탐욕 지수
+            try:
+                from utils.macro_indicators import MacroIndicators
+                mi2 = MacroIndicators()
+                md2 = mi2.fetch()
+                fg  = mi2.get_fear_greed(md2)
+                fg_score = fg.get('score', 50)
+                fg_label = fg.get('label', '중립')
+                fg_icon  = '😱' if fg_score < 25 else '😰' if fg_score < 45 else '😐' if fg_score < 55 else '😊' if fg_score < 75 else '🤑'
+                market_header.append(f'{fg_icon} 공포탐욕: {fg_label} ({fg_score:.0f}점)')
+            except Exception:
+                market_header.append('😐 공포탐욕: 분석중')
+
+            # TOP3 섹터
+            try:
+                from utils.sector_analysis import SectorAnalysis
+                sa2      = SectorAnalysis()
+                rotation = sa2.get_rotation_strategy(df)
+                top3     = rotation.get('top3_sectors', [])
+                if top3:
+                    market_header.append(f'🏭 강세섹터: {" > ".join(top3[:3])}')
+            except Exception:
+                pass
+
+            # 오늘의 특이 공시
+            try:
+                dart_hot = df[df['dart_score'] >= 70]['name'].tolist()[:3]
+                if dart_hot:
+                    market_header.append(f'📋 주목공시: {", ".join(dart_hot)}')
+            except Exception:
+                pass
+
+            # 외국인 연속 순매수 TOP3
+            try:
+                if 'foreign_consec' in df.columns:
+                    frgn_top = df[df['foreign_consec'] >= 3].nlargest(3, 'foreign_consec')
+                    if len(frgn_top) > 0:
+                        frgn_list = [f"{r['name']}({int(r['foreign_consec'])}일)" 
+                                     for _, r in frgn_top.iterrows()]
+                        market_header.append(f'🔥 외국인연속매수: {", ".join(frgn_list)}')
+            except Exception:
+                pass
+
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # ② TOP5 예측 종목
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             top5  = df.head(5)
-            lines = [f'📈 오늘의 TOP5 예측 종목 ({today})\n']
+            lines = [f'📈 <b>오늘의 TOP5 예측 종목</b> ({today})']
+            if market_header:
+                lines.append('')
+                lines.extend(market_header)
+            lines.append('')
 
             for i, (_, row) in enumerate(top5.iterrows(), 1):
                 name   = str(row.get('name', ''))
@@ -228,47 +308,156 @@ jobs:
                 frgn   = row.get('foreign_consec', 0)
 
                 line = (
-                    f'{i}. {name}\n'
-                    f'   상승확률: {prob:.1f}%\n'
-                    f'   현재가: {price:,}원\n'
-                    f'   목표가: {target:,}원\n'
-                    f'   손절가: {stop:,}원\n'
+                    f'<b>{i}. {name}</b>\n'
+                    f'   📊 상승확률: {prob:.1f}%\n'
+                    f'   💰 현재가: {price:,}원\n'
+                    f'   🎯 목표가: {target:,}원\n'
+                    f'   🛡️ 손절가: {stop:,}원\n'
                 )
-                if sector and sector not in ['기타', 'nan', '']:
-                    line += f'   섹터: {sector}\n'
+                if sector and sector not in ['기타', 'nan', '', 'ETF/인덱스']:
+                    line += f'   🏭 섹터: {sector}\n'
                 if theme and theme not in ['nan', '']:
-                    line += f'   테마: {theme}\n'
+                    line += f'   🏷️ 테마: {theme}\n'
                 try:
                     roe = float(row.get('roe', 0) or 0)
                     if roe != 0:
-                        line += f'   ROE: {roe:.1f}%\n'
+                        line += f'   📈 ROE: {roe:.1f}%\n'
                 except Exception:
                     pass
                 if elli and elli not in ['데이터부족', 'nan', '']:
-                    line += f'   파동: {elli}\n'
+                    line += f'   🌊 파동: {elli}\n'
                 if cnn and cnn not in ['없음', 'nan', '']:
-                    line += f'   패턴: {cnn}\n'
+                    line += f'   📐 패턴: {cnn}\n'
                 try:
                     fc = int(float(str(frgn).split('.')[0]))
                     if fc >= 3:
-                        line += f'   외국인: {fc}일 연속 순매수 🔥\n'
+                        line += f'   🔥 외국인: {fc}일 연속 순매수\n'
                     elif fc <= -3:
-                        line += f'   외국인: {abs(fc)}일 연속 순매도 ⚠️\n'
+                        line += f'   ⚠️ 외국인: {abs(fc)}일 연속 순매도\n'
                 except Exception:
                     pass
-
                 lines.append(line)
 
-            lines.append(f'\n✅ 자기학습 누적: {stats["total"]}건')
-            lines.append(f'🎯 적중률: {stats["hit_rate"]}%')
-            lines.append(f'💰 평균수익: {stats["avg_return"]:+.2f}%')
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # ③ 자기학습 통계 + 마일스톤 알림
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            total     = stats["total"]
+            hit_rate  = stats["hit_rate"]
+            avg_ret   = stats["avg_return"]
 
-            msg  = '\n'.join(lines)
-            url  = f'https://api.telegram.org/bot{tg_token}/sendMessage'
-            resp = req.post(url, json={
-                'chat_id':    tg_chat_id,
-                'text':       msg,
-                'parse_mode': 'HTML'
-            }, timeout=10)
-            print(f'텔레그램 전송 완료! status={resp.status_code}')
+            lines.append(f'\n━━━━━━━━━━━━━━━━━━')
+            lines.append(f'✅ 자기학습 누적: {total}건')
+            lines.append(f'🎯 적중률: {hit_rate}%')
+            lines.append(f'💰 평균수익: {avg_ret:+.2f}%')
+
+            # 마일스톤 달성 알림
+            milestones = {
+                50:   '🎉 50건 달성! 베이지안 최적화 시작!',
+                100:  '🎉 100건 달성! 학습 가속화 중!',
+                200:  '🎉 200건 달성! 섹터별 분리학습 시작!',
+                300:  '🎉 300건 달성! 패턴 정밀화 중!',
+                500:  '🎉 500건 달성! 고급 패턴 학습 완료!',
+                1000: '🏆 1000건 달성! 개인화 모드 시작!',
+                2000: '🏆 2000건 달성! 최고 정확도 모드!',
+            }
+            for milestone, msg_ms in milestones.items():
+                # 이번 실행에서 마일스톤 달성 시
+                prev_total = total - saved
+                if prev_total < milestone <= total:
+                    lines.append(f'\n{msg_ms}')
+
+            # 적중률 변화 알림
+            if hit_rate >= 75:
+                lines.append(f'🌟 적중률 {hit_rate}% 달성! 최고 성능!')
+            elif hit_rate >= 70:
+                lines.append(f'✨ 적중률 {hit_rate}% - 우수한 성능 유지 중')
+
+            msg = '\n'.join(lines)
+            status = send_tg(msg)
+            print(f'텔레그램 TOP5 전송 완료! status={status}')
+
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # ④ 텔레그램 양방향 대화 (메시지 수신 처리)
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            try:
+                # 미처리 메시지 확인
+                upd_url = f'https://api.telegram.org/bot{tg_token}/getUpdates'
+                upd_resp = req.get(upd_url, params={'timeout': 0}, timeout=5)
+                updates  = upd_resp.json().get('result', [])
+
+                if updates:
+                    last_update_id = updates[-1]['update_id']
+                    # 처리 후 offset 업데이트
+                    req.get(upd_url, params={'offset': last_update_id + 1}, timeout=5)
+
+                    for upd in updates[-5:]:  # 최근 5개만 처리
+                        msg_obj = upd.get('message', {})
+                        text    = msg_obj.get('text', '').strip().lower()
+                        if not text:
+                            continue
+
+                        reply = ''
+
+                        # 명령어 처리
+                        if text in ['top3', 'top5', '탑3', '탑5', '오늘탑', '오늘 top']:
+                            top_lines = [f'📊 <b>현재 TOP5</b>\n']
+                            for i, (_, row) in enumerate(df.head(5).iterrows(), 1):
+                                top_lines.append(
+                                    f'{i}. {row["name"]} '
+                                    f'({float(row.get("rise_prob",0)):.1f}%)'
+                                )
+                            reply = '\n'.join(top_lines)
+
+                        elif text in ['시장', '시장어때', '시장 어때', '국면']:
+                            reply = f'📊 <b>현재 시장 현황</b>\n\n'
+                            reply += '\n'.join(market_header) if market_header else '분석중'
+
+                        elif text in ['학습', '자기학습', '누적', '적중률']:
+                            reply = (
+                                f'🧬 <b>자기학습 현황</b>\n\n'
+                                f'✅ 누적: {total}건\n'
+                                f'🎯 적중률: {hit_rate}%\n'
+                                f'💰 평균수익: {avg_ret:+.2f}%\n'
+                            )
+                            if total < 200:
+                                reply += f'\n📌 {200-total}건 더 쌓이면 섹터별 학습 시작!'
+                            elif total < 1000:
+                                reply += f'\n📌 {1000-total}건 더 쌓이면 개인화 시작!'
+                            else:
+                                reply += '\n🏆 개인화 모드 활성화!'
+
+                        elif text in ['도움말', 'help', '?', '명령어']:
+                            reply = (
+                                '📋 <b>사용 가능한 명령어</b>\n\n'
+                                '📈 top3 / top5 → 현재 TOP 종목\n'
+                                '📊 시장 → 시장 현황\n'
+                                '🧬 학습 → 자기학습 현황\n'
+                                '❓ 도움말 → 명령어 목록\n'
+                            )
+
+                        # 종목명 검색 (df에서 찾기)
+                        else:
+                            found = df[df['name'].str.contains(text, case=False, na=False)]
+                            if len(found) > 0:
+                                row = found.iloc[0]
+                                reply = (
+                                    f'🔍 <b>{row["name"]} 분석 결과</b>\n\n'
+                                    f'📊 상승확률: {float(row.get("rise_prob",0)):.1f}%\n'
+                                    f'💰 현재가: {int(float(row.get("current_price",0) or 0)):,}원\n'
+                                    f'🎯 목표가: {int(float(row.get("target_price",0) or 0)):,}원\n'
+                                    f'🛡️ 손절가: {int(float(row.get("stop_price",0) or 0)):,}원\n'
+                                )
+                                sec = str(row.get("sector",""))
+                                thm = str(row.get("theme_tag",""))
+                                if sec and sec not in ["기타","nan","","ETF/인덱스"]:
+                                    reply += f'🏭 섹터: {sec}\n'
+                                if thm and thm not in ["nan",""]:
+                                    reply += f'🏷️ 테마: {thm}\n'
+
+                        if reply:
+                            send_tg(reply)
+                            print(f'텔레그램 답변 전송: {text[:20]}')
+
+            except Exception as e:
+                print(f'[주의] 텔레그램 양방향: {e}')
         PYEOF
