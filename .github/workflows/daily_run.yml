@@ -20,6 +20,14 @@ jobs:
     - name: 코드 받기
       uses: actions/checkout@v4
 
+    - name: 자기학습 DB 복원
+      uses: actions/cache@v4
+      with:
+        path: .cache
+        key: learning-cache-${{ github.run_number }}
+        restore-keys: |
+          learning-cache-
+
     - name: Python 설치
       uses: actions/setup-python@v5
       with:
@@ -457,8 +465,11 @@ jobs:
                             )
 
                         # 종목명 검색 (df에서 찾기)
+                        # "삼성전자 분석", "삼성전자 어때" 등 다양한 입력 처리
                         else:
-                            found = df[df['name'].str.contains(text, case=False, na=False)]
+                            # 불필요한 단어 제거 후 검색
+                            clean = text.replace('분석','').replace('어때','').replace('점수','').replace('예측','').replace('알려줘','').replace('?','').strip()
+                            found = df[df['name'].str.contains(clean, case=False, na=False)] if clean else pd.DataFrame()
                             if len(found) > 0:
                                 row = found.iloc[0]
                                 reply = (
@@ -482,3 +493,10 @@ jobs:
             except Exception as e:
                 print(f'[주의] 텔레그램 양방향: {e}')
         PYEOF
+
+    - name: 자기학습 DB 저장
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: .cache
+        key: learning-cache-${{ github.run_number }}
