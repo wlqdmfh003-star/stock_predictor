@@ -21,10 +21,10 @@ jobs:
       uses: actions/checkout@v4
 
     - name: 자기학습 DB 복원
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
         path: .cache
-        key: learning-cache-${{ github.run_number }}
+        key: learning-cache-latest
         restore-keys: |
           learning-cache-
 
@@ -499,4 +499,4 @@ jobs:
       uses: actions/cache/save@v4
       with:
         path: .cache
-        key: learning-cache-${{ github.run_number }}
+        key: learning-cache-latest

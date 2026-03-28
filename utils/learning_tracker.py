@@ -273,7 +273,8 @@ class LearningDB:
                     hit            INTEGER,
                     market_phase   TEXT,
                     factors        TEXT,
-                    created_at     TEXT DEFAULT CURRENT_TIMESTAMP
+                    created_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(date, code)
                 );
                 CREATE INDEX IF NOT EXISTS idx_date ON predictions(date);
                 CREATE INDEX IF NOT EXISTS idx_code ON predictions(code);
@@ -286,6 +287,16 @@ class LearningDB:
                 );
             """)
             conn.commit()
+        # 기존 DB에 UNIQUE 인덱스 없으면 추가 시도 (하위호환)
+        try:
+            with self._conn() as conn:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "idx_date_code ON predictions(date, code)"
+                )
+                conn.commit()
+        except Exception:
+            pass
         # 기존 JSON 데이터 마이그레이션
         self._migrate_from_json()
 
@@ -327,23 +338,33 @@ class LearningDB:
             pass
 
     def save_predictions(self, date: str, records: list) -> int:
+        """
+        ★ 수정: 같은 날 같은 종목 중복 저장 방지
+        → 날짜+코드 기준으로 없을 때만 저장
+        → 매일 누적 가능
+        """
         with self._conn() as conn:
-            # 오늘 기존 데이터 삭제 (덮어쓰기)
-            conn.execute("DELETE FROM predictions WHERE date=?", (date,))
+            # ★ 기존 DELETE 제거 → INSERT OR IGNORE로 중복 방지
+            saved = 0
             for rec in records:
-                conn.execute("""
-                    INSERT INTO predictions
-                    (date, code, name, predicted_prob, market_phase, factors)
-                    VALUES (?,?,?,?,?,?)
-                """, (
-                    date,
-                    rec["code"], rec["name"],
-                    rec["predicted_prob"],
-                    rec.get("market_phase","중립"),
-                    json.dumps(rec.get("factors",{}), ensure_ascii=False),
-                ))
+                try:
+                    conn.execute("""
+                        INSERT OR IGNORE INTO predictions
+                        (date, code, name, predicted_prob, market_phase, factors)
+                        VALUES (?,?,?,?,?,?)
+                    """, (
+                        date,
+                        rec["code"], rec["name"],
+                        rec["predicted_prob"],
+                        rec.get("market_phase","중립"),
+                        json.dumps(rec.get("factors",{}), ensure_ascii=False),
+                    ))
+                    if conn.execute("SELECT changes()").fetchone()[0] > 0:
+                        saved += 1
+                except Exception:
+                    continue
             conn.commit()
-        return len(records)
+        return saved
 
     def get_pending(self, date: str) -> list:
         """미결(hit=NULL) 데이터 조회"""
