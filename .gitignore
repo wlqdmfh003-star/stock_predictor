@@ -1,5 +1,32 @@
-venv 
-.cache/ 
-__pycache__/ 
-*.pyc 
-catboost_info/ 
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+
+# 가상환경
+venv/
+env/
+.env
+
+# 모델 파일 (용량 큼)
+*.pt
+*.pth
+*.pkl
+*.joblib
+
+# ★ .cache 폴더: DB/JSON 파일만 포함 (모델 파일 제외)
+# learning.db, bayesian_state.json 등은 포함
+.cache/*.pt
+.cache/*.pth
+
+# 임시 파일
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
