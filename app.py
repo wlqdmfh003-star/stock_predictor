@@ -318,6 +318,22 @@ if analyze_btn:
         with st.spinner("🤝 앙상블 (XGB+LGB+CatBoost, 109피처, 트리플 타임프레임) 예측 중..."):
             df=EnsembleModel().predict_batch(df)
 
+    # ★ 클러스터링 파이프라인 (체크 시 실행)
+    if use_clustering:
+        with st.spinner("🔵 종목 클러스터링 분석 중..."):
+            try:
+                df = StockCluster().analyze(df)
+            except Exception as _ce:
+                pass
+
+    # ★ 옵션 전략 파이프라인 (체크 시 실행)
+    if use_option:
+        with st.spinner("🎯 옵션 전략 분석 중..."):
+            try:
+                df = OptionStrategy().analyze(df)
+            except Exception as _oe:
+                pass
+
     # ★ sector/theme_tag 최종 안전망 (직접 계산)
     if "sector" not in df.columns or df["sector"].isna().all():
         df = SectorAnalysis().analyze(df)
