@@ -322,7 +322,7 @@ if analyze_btn:
     if use_clustering:
         with st.spinner("🔵 종목 클러스터링 분석 중..."):
             try:
-                df = StockCluster().analyze(df)
+                df = StockCluster().fit_predict(df)
             except Exception as _ce:
                 pass
 
