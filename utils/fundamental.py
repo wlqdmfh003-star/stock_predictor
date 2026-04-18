@@ -22,19 +22,9 @@ _HEADERS = {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 방법 1: 네이버 main.naver — PER/PBR/EPS (em#_per, em#_pbr, em#_eps)
-#          + ROE (th[ROE(%)] 옆 td)
-# ★ 직접 확인된 셀렉터 사용
+# 방법 1: 네이버 main.naver — PER/PBR/EPS/ROE (확인된 셀렉터)
 # ══════════════════════════════════════════════════════════════════════════════
 def _fetch_naver_main(code: str) -> dict:
-    """
-    네이버 금융 main.naver 페이지
-    직접 확인된 셀렉터:
-      PER → <em id="_per">27.96</em>
-      PBR → <em id="_pbr">2.87</em>
-      EPS → <em id="_eps">6,564</em>
-      ROE → th(ROE(%)) 옆 td → 10.85
-    """
     result = _empty()
     try:
         from bs4 import BeautifulSoup
@@ -43,46 +33,28 @@ def _fetch_naver_main(code: str) -> dict:
         resp.encoding = "euc-kr"
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # ── PER / PBR / EPS (em id 방식) ────────────────────────────────────
-        for field, em_id in [("per","_per"), ("pbr","_pbr"),
-                              ("eps","_eps"), ("bps","_bps")]:
+        # em#_per, em#_pbr, em#_eps (직접 확인된 셀렉터)
+        for field, em_id in [("per","_per"),("pbr","_pbr"),
+                              ("eps","_eps"),("bps","_bps")]:
             tag = soup.find("em", id=em_id)
             if tag:
                 result[field] = _safe_float(tag.get_text())
 
-        # ── ROE (th 텍스트로 찾고 옆 td) ────────────────────────────────────
+        # ROE — th(ROE(%)) 옆 td (직접 확인된 방식)
         for th in soup.find_all("th"):
             th_txt = th.get_text(strip=True)
-            # "ROE(%)" 또는 "ROE(자기자본이익률)" 둘 다 처리
             if "ROE" in th_txt:
                 td = th.find_next_sibling("td")
                 if td:
                     val = _safe_float(td.get_text(strip=True))
                     if val != 0:
-                        # ROE(%) 우선
                         if "%" in th_txt:
                             result["roe"] = val
                             break
                         elif result["roe"] == 0:
                             result["roe"] = val
 
-        # ── ROA / 부채비율도 같은 방식으로 시도 ─────────────────────────────
-        for th in soup.find_all("th"):
-            th_txt = th.get_text(strip=True)
-            td = th.find_next_sibling("td")
-            if not td:
-                continue
-            val = _safe_float(td.get_text(strip=True))
-            if val == 0:
-                continue
-            if "ROA" in th_txt and result["roa"] == 0:
-                result["roa"] = val
-            elif "부채" in th_txt and result["debt_ratio"] == 0:
-                result["debt_ratio"] = val
-            elif "영업이익률" in th_txt and result["op_margin"] == 0:
-                result["op_margin"] = val
-
-        # ── ROE 보완: EPS/BPS로 계산 ────────────────────────────────────────
+        # ROE 보완: EPS/BPS 계산
         if result["roe"] == 0 and result["bps"] > 0 and result["eps"] != 0:
             result["roe"] = round(result["eps"] / result["bps"] * 100, 2)
 
@@ -92,8 +64,96 @@ def _fetch_naver_main(code: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 방법 2: 네이버 재무분석 페이지 — ROA/부채비율/영업이익률/매출증가율
-# URL: finance.naver.com/item/coinfo.naver?code={code}&target=finsum_more
+# 방법 2: wisereport JSON API — ROA/영업이익률/부채비율/매출증가율
+# ★ JavaScript 동적 데이터를 JSON API로 직접 수집
+# ══════════════════════════════════════════════════════════════════════════════
+def _fetch_wisereport(code: str) -> dict:
+    """
+    wisereport.co.kr JSON API로 ROA/영업이익률/부채비율/매출증가율 수집
+    네이버 재무분석 iframe 데이터 소스
+    """
+    result = _empty()
+    try:
+        # wisereport 재무비율 API
+        urls = [
+            f"https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd={code}",
+            f"https://comp.wisereport.co.kr/company/ajax/cF3002.aspx?cmp_cd={code}&fin_typ=0&freq_typ=Y",
+            f"https://navercomp.wisereport.co.kr/v2/company/ajax/cF3002.aspx?cmp_cd={code}&fin_typ=0&freq_typ=Y",
+        ]
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Referer": f"https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd={code}",
+            "X-Requested-With": "XMLHttpRequest",
+        }
+
+        for url in urls:
+            try:
+                resp = requests.get(url, headers=headers, timeout=8)
+                if resp.status_code != 200:
+                    continue
+
+                # JSON 응답 시도
+                try:
+                    data = resp.json()
+                    if isinstance(data, dict):
+                        # 다양한 키 이름 시도
+                        result["roa"]        = _safe_float(data.get("ROA") or data.get("roa"))
+                        result["op_margin"]  = _safe_float(data.get("영업이익률") or
+                                                           data.get("OPM") or
+                                                           data.get("op_margin"))
+                        result["debt_ratio"] = _safe_float(data.get("부채비율") or
+                                                           data.get("DEBT") or
+                                                           data.get("debt_ratio"))
+                        result["rev_growth"] = _safe_float(data.get("매출증가율") or
+                                                           data.get("REV_GROWTH"))
+                        if any(result[k] != 0 for k in ["roa","op_margin","debt_ratio"]):
+                            return result
+                except Exception:
+                    pass
+
+                # HTML 응답 시도 (테이블 파싱)
+                from bs4 import BeautifulSoup
+                resp.encoding = "utf-8"
+                soup = BeautifulSoup(resp.text, "html.parser")
+
+                # 숫자 데이터가 있는 td 파싱
+                for tr in soup.find_all("tr"):
+                    tds = tr.find_all("td")
+                    ths = tr.find_all("th")
+                    if not ths or len(tds) < 2:
+                        continue
+                    label = ths[0].get_text(strip=True)
+                    # 첫 번째 숫자 td (가장 최신)
+                    for td in tds:
+                        val_txt = td.get_text(strip=True).replace(",","").replace("%","")
+                        try:
+                            val = float(val_txt)
+                            if val == 0:
+                                continue
+                            if   "ROA"    in label and result["roa"]        == 0:
+                                result["roa"]        = val; break
+                            elif "영업이익률" in label and result["op_margin"] == 0:
+                                result["op_margin"]  = val; break
+                            elif "부채"   in label and result["debt_ratio"] == 0:
+                                result["debt_ratio"] = val; break
+                            elif "매출" in label and "증가" in label and result["rev_growth"] == 0:
+                                result["rev_growth"] = val; break
+                        except Exception:
+                            continue
+
+                if any(result[k] != 0 for k in ["roa","op_margin","debt_ratio"]):
+                    return result
+            except Exception:
+                continue
+
+        return result
+    except Exception:
+        return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 방법 3: 네이버 재무분석 페이지 크롤링
 # ══════════════════════════════════════════════════════════════════════════════
 def _fetch_naver_finsum(code: str) -> dict:
     result = _empty()
@@ -111,10 +171,8 @@ def _fetch_naver_finsum(code: str) -> dict:
                 if not ths or not tds:
                     continue
                 label = ths[0].get_text(strip=True)
-                # 가장 최신 연도 값 (숫자 있는 첫 번째 td)
                 for td in tds:
-                    val_txt = td.get_text(strip=True)\
-                               .replace(",","").replace("%","").strip()
+                    val_txt = td.get_text(strip=True).replace(",","").replace("%","").strip()
                     try:
                         val = float(val_txt)
                         if val == 0:
@@ -125,11 +183,12 @@ def _fetch_naver_finsum(code: str) -> dict:
                             result["debt_ratio"] = val; break
                         elif "영업이익률" in label and result["op_margin"] == 0:
                             result["op_margin"]  = val; break
-                        elif "매출" in label and ("증가" in label or "성장" in label) \
-                             and result["rev_growth"] == 0:
+                        elif "매출" in label and "증가" in label and result["rev_growth"] == 0:
                             result["rev_growth"] = val; break
                         elif "ROE"    in label and result["roe"]         == 0:
                             result["roe"]        = val; break
+                        elif "PER"    in label and result["per"]         == 0:
+                            result["per"]        = val; break
                     except Exception:
                         continue
         return result
@@ -138,7 +197,7 @@ def _fetch_naver_finsum(code: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 방법 3: yfinance 최후 폴백
+# 방법 4: yfinance 최후 폴백
 # ══════════════════════════════════════════════════════════════════════════════
 def _fetch_yfinance(code: str) -> dict:
     result = _empty()
@@ -156,6 +215,10 @@ def _fetch_yfinance(code: str) -> dict:
                 result["op_margin"]  = _safe_float(info.get("operatingMargins"), mul=100)
                 result["rev_growth"] = _safe_float(info.get("revenueGrowth"),   mul=100)
                 result["eps"]        = _safe_float(info.get("trailingEps"))
+                # ★ 시가총액 수집
+                mc = info.get("marketCap")
+                if mc and float(mc) > 0:
+                    result["market_cap"] = float(mc)
                 if result["per"] > 0 or result["pbr"] > 0:
                     return result
             except Exception:
@@ -169,6 +232,7 @@ def _fetch_yfinance(code: str) -> dict:
 def _empty() -> dict:
     return {
         "per": 0.0, "pbr": 0.0, "roe": 0.0, "roa": 0.0,
+        "market_cap": 0.0,
         "debt_ratio": 0.0, "op_margin": 0.0, "rev_growth": 0.0,
         "eps": 0.0, "bps": 0.0,
     }
@@ -200,15 +264,12 @@ def _merge(base: dict, extra: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 class FundamentalAnalyzer:
     """
-    재무 분석 v5.9
+    재무 분석 v6.1
+    ★ 1순위: 네이버 main.naver (PER/PBR/ROE/EPS — 직접 확인된 셀렉터)
+    ★ 2순위: wisereport JSON API (ROA/영업이익률/부채비율/매출증가율)
+    ★ 3순위: 네이버 재무분석 페이지 크롤링 보완
+    ★ 4순위: yfinance 최후 폴백
     ★ pykrx 완전 제거
-    ★ 1순위: 네이버 main.naver (실제 확인된 셀렉터)
-             em#_per → PER
-             em#_pbr → PBR
-             em#_eps → EPS
-             th(ROE(%)) 옆 td → ROE
-    ★ 2순위: 네이버 재무분석 페이지 (ROA/부채비율/영업이익률/매출증가율)
-    ★ 3순위: yfinance 최후 폴백
     """
 
     def fetch_and_score(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -218,20 +279,25 @@ class FundamentalAnalyzer:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         def fetch_one(code):
-            # 1순위: 네이버 main.naver (PER/PBR/EPS/ROE)
+            # 1순위: 네이버 main (PER/PBR/ROE)
             data = _fetch_naver_main(code)
 
-            # 2순위: 네이버 재무분석 페이지 (ROA/부채비율/영업이익률/매출증가율)
+            # 2순위: wisereport (ROA/영업이익률/부채비율)
             if data["roa"] == 0 or data["op_margin"] == 0 or data["debt_ratio"] == 0:
+                wise = _fetch_wisereport(code)
+                data = _merge(data, wise)
+
+            # 3순위: 네이버 재무분석 페이지 보완
+            if data["roa"] == 0 or data["op_margin"] == 0:
                 fin = _fetch_naver_finsum(code)
                 data = _merge(data, fin)
 
-            # 3순위: yfinance 최후 폴백
+            # 4순위: yfinance 최후 폴백
             if data["per"] == 0 and data["pbr"] == 0 and data["roe"] == 0:
                 yf_d = _fetch_yfinance(code)
                 data = _merge(data, yf_d)
 
-            # ROE 최종 계산 (EPS/BPS로)
+            # ROE 최종 계산
             if data["roe"] == 0 and data["bps"] > 0 and data["eps"] != 0:
                 data["roe"] = round(data["eps"] / data["bps"] * 100, 2)
 
@@ -250,7 +316,6 @@ class FundamentalAnalyzer:
                 if done % 20 == 0:
                     print(f"  재무 진행: {done}/{len(codes)}")
 
-        # DataFrame 적용
         col_keys = ["per","pbr","roe","roa","debt_ratio","op_margin","rev_growth","eps","bps"]
         cols = {k: [] for k in col_keys + ["fundamental_score"]}
 
@@ -277,10 +342,16 @@ class FundamentalAnalyzer:
                 self._calc_score(per, pbr, roe, roa, debt, opm, revg)
             )
 
+            # ★ 시가총액 yfinance 보완 (pykrx 실패 시)
+            if "market_cap" in d and d["market_cap"] > 0:
+                cur_cap = float(row.get("market_cap", 0) or 0)
+                if cur_cap <= 0:
+                    df.at[row.name, "market_cap"] = d["market_cap"]
+
         for col, vals in cols.items():
             df[col] = vals
 
-        n = len(codes)
+        n     = len(codes)
         per_n = sum(1 for v in cols["per"]       if v > 0)
         roe_n = sum(1 for v in cols["roe"]       if v != 0)
         roa_n = sum(1 for v in cols["roa"]       if v != 0)

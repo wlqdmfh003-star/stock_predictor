@@ -318,14 +318,6 @@ if analyze_btn:
         with st.spinner("🤝 앙상블 (XGB+LGB+CatBoost, 109피처, 트리플 타임프레임) 예측 중..."):
             df=EnsembleModel().predict_batch(df)
 
-    # ★ 클러스터링 파이프라인 (체크 시 실행)
-    if use_clustering:
-        with st.spinner("🔵 종목 클러스터링 분석 중..."):
-            try:
-                df = StockCluster().fit_predict(df)
-            except Exception as _ce:
-                pass
-
     # ★ 옵션 전략 파이프라인 (체크 시 실행)
     if use_option:
         with st.spinner("🎯 옵션 전략 분석 중..."):
@@ -358,6 +350,15 @@ if analyze_btn:
         scorer=MultiFactorScorer(weights=weights)
         df=scorer.score(df)
         df=df.sort_values("rise_prob",ascending=False).reset_index(drop=True)
+
+    # ★ 클러스터링 파이프라인 (rise_prob 생성 후 실행)
+    if use_clustering:
+        with st.spinner("🔵 종목 클러스터링 분석 중..."):
+            try:
+                df = StockCluster().fit_predict(df)
+                print(f"[클러스터링] 완료: {df['cluster_id'].nunique()}개 클러스터")
+            except Exception as _ce:
+                print(f"[클러스터링] 오류: {_ce}")
 
     saved=tracker.save_predictions(df); updated=tracker.update_results(df)
     ns2=tracker.get_stats()
@@ -434,6 +435,7 @@ if analyze_btn:
         def fmt_cap(v):
             try:
                 v=float(v)
+                if v <= 0: return "-"
                 if v>=1e12: return f"{v/1e12:.1f}조"
                 elif v>=1e8: return f"{int(v/1e8):,}억"
                 return f"{int(v):,}"
