@@ -1,0 +1,940 @@
+﻿import pandas as pd
+import numpy as np
+import warnings
+warnings.filterwarnings('ignore')
+
+
+class TechnicalIndicators:
+    """
+    기술적 지표 계산 v7.0
+    ★ 기존: RSI / MACD / 볼린저 / ATR / 모멘텀
+    ★ 신규: 스토캐스틱 (과매수/과매도 정밀 감지)
+    ★ 신규: CCI (추세 강도 + 이탈 감지)
+    ★ 신규: MFI (자금 흐름 지수 — 거래량 반영 RSI)
+    ★ 신규: OBV 기울기 + 다이버전스 감지
+    ★ 신규: VWAP 이탈 강도 + 위/아래 구분
+    ★ 기존: 캔들패턴 15가지 / 거래량프로파일 / 리스크지표
+    """
+
+    def calculate_all(self, df: pd.DataFrame) -> pd.DataFrame:
+        results = []
+        for _, row in df.iterrows():
+            ohlcv = row.get("ohlcv")
+            # ★ Series.update()는 기존 키만 업데이트 → dict 병합 방식으로 수정
+            row_dict = row.to_dict()
+            if ohlcv is None or len(ohlcv) < 30:
+                row_dict.update(self._default_indicators())
+            else:
+                row_dict.update(self._calc_row(ohlcv, row))
+            results.append(row_dict)
+        return pd.DataFrame(results).reset_index(drop=True)
+
+    # ── 기존 지표 ──────────────────────────────────────────────────
+
+    def _rsi(self, close, period=14):
+        delta = close.diff().dropna()
+        gain  = delta.clip(lower=0)
+        loss  = (-delta).clip(lower=0)
+        avg_g = gain.rolling(period).mean()
+        avg_l = loss.rolling(period).mean()
+        rs    = avg_g / (avg_l + 1e-9)
+        rsi   = 100 - (100 / (1 + rs))
+        return float(rsi.iloc[-1]) if len(rsi) > 0 else 50.0
+
+    def _macd(self, close):
+        ema12  = close.ewm(span=12, adjust=False).mean()
+        ema26  = close.ewm(span=26, adjust=False).mean()
+        macd   = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+        hist   = macd - signal
+        cross  = int(hist.iloc[-1] > 0 and hist.iloc[-2] <= 0)
+        return float(macd.iloc[-1]), float(signal.iloc[-1]), float(hist.iloc[-1]), cross
+
+    def _bollinger(self, close, period=20):
+        ma    = close.rolling(period).mean()
+        std   = close.rolling(period).std()
+        upper = ma + 2 * std
+        lower = ma - 2 * std
+        cur   = float(close.iloc[-1])
+        ub    = float(upper.iloc[-1])
+        lb    = float(lower.iloc[-1])
+        pct_b = (cur - lb) / (ub - lb + 1e-9)
+        width = (ub - lb) / float(ma.iloc[-1] + 1e-9)
+        return pct_b, width, ub, lb
+
+    def _momentum(self, close):
+        ma5  = float(close.rolling(5).mean().iloc[-1])
+        ma20 = float(close.rolling(20).mean().iloc[-1])
+        ma60 = float(close.rolling(60).mean().iloc[-1]) if len(close) >= 60 else ma20
+        cur  = float(close.iloc[-1])
+        score  = 0
+        score += 25 * int(cur > ma5)
+        score += 25 * int(ma5 > ma20)
+        score += 25 * int(ma20 > ma60)
+        score += 25 * int(cur > ma60)
+        mom_5  = (cur / float(close.iloc[-6])  - 1) * 100 if len(close) >= 6  else 0.0
+        mom_20 = (cur / float(close.iloc[-21]) - 1) * 100 if len(close) >= 21 else 0.0
+        mom_60 = (cur / float(close.iloc[-61]) - 1) * 100 if len(close) >= 61 else 0.0
+        return score, ma5, ma20, ma60, mom_5, mom_20, mom_60
+
+    def _volatility_breakout(self, ohlcv, k=0.5):
+        if len(ohlcv) < 2:
+            return 0
+        prev   = ohlcv.iloc[-2]
+        target = float(ohlcv.iloc[-1]["open"]) + \
+                 (float(prev["high"]) - float(prev["low"])) * k
+        return int(float(ohlcv.iloc[-1]["close"]) > target)
+
+    def _atr(self, ohlcv, period=14):
+        h  = ohlcv["high"].astype(float)
+        l  = ohlcv["low"].astype(float)
+        c  = ohlcv["close"].astype(float).shift(1)
+        tr = pd.concat([h - l, (h - c).abs(), (l - c).abs()], axis=1).max(axis=1)
+        return float(tr.rolling(period).mean().iloc[-1])
+
+
+    # ── ★ 스토캐스틱 (Stochastic) ────────────────────────────────
+    def _stochastic(self, ohlcv: pd.DataFrame,
+                    k_period=14, d_period=3) -> tuple:
+        """
+        스토캐스틱 %K / %D
+        %K = (현재가 - 최저가) / (최고가 - 최저가) * 100
+        %D = %K의 3일 이동평균
+        과매수: %K > 80 / 과매도: %K < 20
+        """
+        try:
+            c = ohlcv["close"].astype(float)
+            h = ohlcv["high"].astype(float)  if "high" in ohlcv.columns else c
+            l = ohlcv["low"].astype(float)   if "low"  in ohlcv.columns else c
+
+            n = min(k_period, len(c))
+            lowest  = l.rolling(n).min()
+            highest = h.rolling(n).max()
+            stoch_k = (c - lowest) / (highest - lowest + 1e-9) * 100
+            stoch_d = stoch_k.rolling(d_period).mean()
+
+            k = float(stoch_k.iloc[-1]) if len(stoch_k) > 0 else 50.0
+            d = float(stoch_d.iloc[-1]) if len(stoch_d) > 0 else 50.0
+
+            # 스토캐스틱 점수
+            score = 50.0
+            if   k < 20:              score += 25   # 과매도 → 반등 기대
+            elif k < 30:              score += 15
+            elif k > 80:              score -= 20   # 과매수 → 하락 주의
+            elif k > 70:              score -= 10
+            if k > d and k < 50:      score += 10   # 골든크로스 + 저점
+            if k < d and k > 50:      score -= 10   # 데드크로스 + 고점
+
+            return float(k), float(d), float(np.clip(score, 0, 100))
+        except Exception:
+            return 50.0, 50.0, 50.0
+
+    # ── ★ CCI (Commodity Channel Index) ─────────────────────────
+    def _cci(self, ohlcv: pd.DataFrame, period=20) -> tuple:
+        """
+        CCI = (전형가격 - MA) / (0.015 × 평균편차)
+        +100 이상: 과매수 / -100 이하: 과매도
+        ±200 이상: 극단적 이탈 (반전 신호 강함)
+        """
+        try:
+            c = ohlcv["close"].astype(float)
+            h = ohlcv["high"].astype(float)  if "high" in ohlcv.columns else c
+            l = ohlcv["low"].astype(float)   if "low"  in ohlcv.columns else c
+
+            tp  = (h + l + c) / 3   # 전형 가격
+            ma  = tp.rolling(period).mean()
+            mad = tp.rolling(period).apply(lambda x: np.mean(np.abs(x - x.mean())))
+            cci = (tp - ma) / (0.015 * mad + 1e-9)
+            val = float(cci.iloc[-1]) if len(cci) > 0 else 0.0
+
+            # CCI 점수
+            score = 50.0
+            if   val <= -200:  score += 30   # 극단적 과매도 → 강한 반등
+            elif val <= -100:  score += 20
+            elif val <= -50:   score += 10
+            elif val >= 200:   score -= 25   # 극단적 과매수 → 하락 주의
+            elif val >= 100:   score -= 15
+            elif val >= 50:    score -= 5
+            # 추세 방향
+            if len(cci) >= 3:
+                trend = cci.iloc[-1] - cci.iloc[-3]
+                if   trend > 50:  score += 10   # CCI 급상승
+                elif trend < -50: score -= 10
+
+            return float(val), float(np.clip(score, 0, 100))
+        except Exception:
+            return 0.0, 50.0
+
+    # ── ★ MFI (Money Flow Index) ─────────────────────────────────
+    def _mfi(self, ohlcv: pd.DataFrame, period=14) -> tuple:
+        """
+        MFI = 거래량 반영 RSI (자금 흐름 지수)
+        거래량이 많은 날의 방향을 더 중요하게 반영
+        과매수: >80 / 과매도: <20
+        """
+        try:
+            c = ohlcv["close"].astype(float)
+            h = ohlcv["high"].astype(float)  if "high" in ohlcv.columns else c
+            l = ohlcv["low"].astype(float)   if "low"  in ohlcv.columns else c
+            v = ohlcv["volume"].astype(float) if "volume" in ohlcv.columns else                 pd.Series(np.ones(len(c)))
+
+            tp   = (h + l + c) / 3          # 전형 가격
+            rmf  = tp * v                    # Raw Money Flow
+            diff = tp.diff()
+
+            pmf  = rmf.where(diff > 0, 0).rolling(period).sum()   # 양의 자금흐름
+            nmf  = rmf.where(diff < 0, 0).rolling(period).sum()   # 음의 자금흐름
+            mfi  = 100 - (100 / (1 + pmf / (nmf + 1e-9)))
+            val  = float(mfi.iloc[-1]) if len(mfi) > 0 else 50.0
+
+            # MFI 점수
+            score = 50.0
+            if   val < 20:   score += 25   # 과매도 + 자금 유입 시작
+            elif val < 30:   score += 15
+            elif val > 80:   score -= 20   # 과매수 + 자금 유출 시작
+            elif val > 70:   score -= 10
+            # 다이버전스 감지 (간이)
+            if len(c) >= period+5 and val < 40:
+                price_trend = c.iloc[-1] - c.iloc[-(period//2)]
+                if price_trend < 0 and val > 40:
+                    score += 15   # 불리시 다이버전스
+
+            return float(val), float(np.clip(score, 0, 100))
+        except Exception:
+            return 50.0, 50.0
+
+    # ── ★ OBV 기울기 + 다이버전스 ───────────────────────────────
+    def _obv_advanced(self, ohlcv: pd.DataFrame) -> dict:
+        """
+        OBV (On Balance Volume) 고도화
+        - OBV 기울기: 상승추세 여부
+        - 가격-OBV 다이버전스: 추세 반전 신호
+        """
+        try:
+            c = ohlcv["close"].astype(float)
+            v = ohlcv["volume"].astype(float) if "volume" in ohlcv.columns else                 pd.Series(np.ones(len(c)))
+
+            direction = c.diff().apply(lambda x: 1 if x > 0 else -1 if x < 0 else 0)
+            obv = (v * direction).cumsum()
+
+            # OBV 기울기 (20일)
+            if len(obv) >= 20:
+                obv_20  = float(obv.iloc[-1] - obv.iloc[-20])
+                obv_slope = obv_20 / (abs(float(obv.iloc[-20])) + 1e-9) * 100
+            else:
+                obv_slope = 0.0
+
+            # 다이버전스 감지 (10일 기준)
+            n = min(10, len(c)-1)
+            price_dir = float(c.iloc[-1] - c.iloc[-n-1])
+            obv_dir   = float(obv.iloc[-1] - obv.iloc[-n-1])
+            divergence = 0
+            if   price_dir > 0 and obv_dir < 0: divergence = -1  # 베어리시 다이버전스
+            elif price_dir < 0 and obv_dir > 0: divergence =  1  # 불리시 다이버전스
+
+            score = 50.0
+            if   obv_slope > 10:   score += 20
+            elif obv_slope > 5:    score += 12
+            elif obv_slope < -10:  score -= 20
+            elif obv_slope < -5:   score -= 12
+            if   divergence == 1:  score += 15   # 불리시 다이버전스
+            elif divergence == -1: score -= 15   # 베어리시 다이버전스
+
+            return {
+                "obv_slope":    round(obv_slope, 2),
+                "obv_divergence": divergence,
+                "obv_score":    float(np.clip(score, 0, 100)),
+            }
+        except Exception:
+            return {"obv_slope": 0.0, "obv_divergence": 0, "obv_score": 50.0}
+
+    # ── ★ VWAP 이탈 강도 ────────────────────────────────────────
+    def _vwap_advanced(self, ohlcv: pd.DataFrame) -> dict:
+        """
+        VWAP (Volume Weighted Average Price) 고도화
+        - 현재가 vs VWAP 이탈 강도
+        - 위: 강세 / 아래: 약세
+        - 이탈 강도: 멀수록 반전 가능성
+        """
+        try:
+            c = ohlcv["close"].astype(float)
+            h = ohlcv["high"].astype(float)  if "high" in ohlcv.columns else c
+            l = ohlcv["low"].astype(float)   if "low"  in ohlcv.columns else c
+            v = ohlcv["volume"].astype(float) if "volume" in ohlcv.columns else                 pd.Series(np.ones(len(c)))
+
+            tp   = (h + l + c) / 3
+            vwap = (tp * v).cumsum() / (v.cumsum() + 1e-9)
+
+            cur       = float(c.iloc[-1])
+            vwap_cur  = float(vwap.iloc[-1])
+            deviation = (cur - vwap_cur) / (vwap_cur + 1e-9) * 100
+
+            score = 50.0
+            if   deviation > 5:   score += 15   # VWAP 위 강세
+            elif deviation > 2:   score += 8
+            elif deviation > 0:   score += 3
+            elif deviation < -5:  score -= 15   # VWAP 아래 약세
+            elif deviation < -2:  score -= 8
+            elif deviation < 0:   score -= 3
+
+            # 극단적 이탈 시 반전 가능성
+            if   deviation > 10:  score -= 10   # 과도한 상승 → 반전 주의
+            elif deviation < -10: score += 10   # 과도한 하락 → 반등 기대
+
+            return {
+                "vwap":          round(vwap_cur, 0),
+                "vwap_deviation":round(deviation, 2),
+                "vwap_above":    int(cur > vwap_cur),
+                "vwap_score":    float(np.clip(score, 0, 100)),
+            }
+        except Exception:
+            return {"vwap": 0.0, "vwap_deviation": 0.0,
+                    "vwap_above": 0, "vwap_score": 50.0}
+
+
+    # ── ★ 일목균형표 (Ichimoku Cloud) ─────────────────────────────
+    def _ichimoku(self, ohlcv: pd.DataFrame) -> dict:
+        """
+        일목균형표
+        - 전환선(9일) / 기준선(26일) / 선행스팬A/B / 후행스팬
+        - 구름대 위 = 강세 / 아래 = 약세
+        - 전환선 > 기준선 = 골든크로스
+        """
+        try:
+            c = ohlcv["close"].astype(float)
+            h = ohlcv["high"].astype(float)  if "high" in ohlcv.columns else c
+            l = ohlcv["low"].astype(float)   if "low"  in ohlcv.columns else c
+
+            def mid(h_s, l_s, n):
+                return (h_s.rolling(n).max() + l_s.rolling(n).min()) / 2
+
+            tenkan  = mid(h, l, 9)    # 전환선
+            kijun   = mid(h, l, 26)   # 기준선
+            spanA   = ((tenkan + kijun) / 2).shift(26)   # 선행스팬A
+            spanB   = mid(h, l, 52).shift(26)             # 선행스팬B
+            chikou  = c.shift(-26)                         # 후행스팬
+
+            t  = float(tenkan.iloc[-1]) if len(tenkan) > 0 else 0
+            k  = float(kijun.iloc[-1])  if len(kijun)  > 0 else 0
+            sa = float(spanA.iloc[-1])  if not spanA.empty else 0
+            sb = float(spanB.iloc[-1])  if not spanB.empty else 0
+            cur = float(c.iloc[-1])
+
+            # 구름대 위/아래
+            cloud_top    = max(sa, sb) if sa and sb else 0
+            cloud_bottom = min(sa, sb) if sa and sb else 0
+            above_cloud  = int(cur > cloud_top)
+            below_cloud  = int(cur < cloud_bottom)
+            in_cloud     = int(cloud_bottom <= cur <= cloud_top)
+
+            # 골든/데드크로스
+            golden_cross = int(t > k and len(tenkan) > 2 and
+                               float(tenkan.iloc[-2]) <= float(kijun.iloc[-2]))
+            dead_cross   = int(t < k and len(tenkan) > 2 and
+                               float(tenkan.iloc[-2]) >= float(kijun.iloc[-2]))
+
+            score = 50.0
+            if above_cloud:   score += 20
+            elif below_cloud: score -= 20
+            elif in_cloud:    score -= 5
+            if golden_cross:  score += 15
+            if dead_cross:    score -= 15
+            if t > k:         score += 8
+            elif t < k:       score -= 8
+            if cur > k:       score += 5
+            elif cur < k:     score -= 5
+
+            return {
+                "ichi_tenkan":      round(t, 2),
+                "ichi_kijun":       round(k, 2),
+                "ichi_above_cloud": above_cloud,
+                "ichi_below_cloud": below_cloud,
+                "ichi_in_cloud":    in_cloud,
+                "ichi_golden":      golden_cross,
+                "ichi_dead":        dead_cross,
+                "ichi_score":       float(np.clip(score, 0, 100)),
+            }
+        except Exception:
+            return self._default_ichimoku()
+
+    # ── ★ 피보나치 되돌림 ────────────────────────────────────────────
+    def _fibonacci(self, ohlcv: pd.DataFrame, period: int = 60) -> dict:
+        """
+        피보나치 되돌림
+        - 최근 N일 고점/저점 기준
+        - 23.6% / 38.2% / 50% / 61.8% / 78.6% 레벨
+        - 현재가가 어느 레벨에 있는지 감지
+        """
+        try:
+            c = ohlcv["close"].astype(float)
+            h = ohlcv["high"].astype(float)  if "high" in ohlcv.columns else c
+            l = ohlcv["low"].astype(float)   if "low"  in ohlcv.columns else c
+
+            n = min(period, len(c))
+            highest = float(h.tail(n).max())
+            lowest  = float(l.tail(n).min())
+            diff    = highest - lowest
+            cur     = float(c.iloc[-1])
+
+            if diff <= 0:
+                return self._default_fibonacci()
+
+            # 피보나치 레벨 (하락 후 반등 기준)
+            levels = {
+                "fib_0":    lowest,
+                "fib_236":  lowest + diff * 0.236,
+                "fib_382":  lowest + diff * 0.382,
+                "fib_500":  lowest + diff * 0.500,
+                "fib_618":  lowest + diff * 0.618,
+                "fib_786":  lowest + diff * 0.786,
+                "fib_100":  highest,
+            }
+
+            # 현재가 위치 (0~100%)
+            fib_pct = float((cur - lowest) / diff * 100)
+
+            # 가장 가까운 지지/저항 레벨 찾기
+            level_vals = sorted(levels.values())
+            nearest_support    = max([v for v in level_vals if v <= cur], default=lowest)
+            nearest_resistance = min([v for v in level_vals if v >= cur], default=highest)
+
+            # 황금비율(61.8%) 지지 여부
+            at_golden = int(abs(cur - levels["fib_618"]) / diff < 0.02)
+            at_half   = int(abs(cur - levels["fib_500"]) / diff < 0.02)
+
+            score = 50.0
+            # 황금비율 지지 = 강한 매수 신호
+            if at_golden: score += 20
+            if at_half:   score += 12
+            # 상승 추세에서 38.2% 지지
+            if 35 <= fib_pct <= 42: score += 15
+            # 과도한 되돌림 경고
+            if fib_pct < 20: score -= 15
+            if fib_pct > 85: score += 10  # 신고가 근접
+
+            return {
+                **{k: round(v, 2) for k, v in levels.items()},
+                "fib_pct":              round(fib_pct, 1),
+                "fib_nearest_support":  round(nearest_support, 2),
+                "fib_nearest_resist":   round(nearest_resistance, 2),
+                "fib_at_golden":        at_golden,
+                "fib_score":            float(np.clip(score, 0, 100)),
+            }
+        except Exception:
+            return self._default_fibonacci()
+
+    # ── ★ 엘리어트파동 자동감지 (간이) ─────────────────────────────
+    def _elliott_wave(self, ohlcv: pd.DataFrame) -> dict:
+        """
+        엘리어트파동 간이 감지
+        - 5파동 상승 / 3파동 조정 패턴 감지
+        - 피크/저점 자동 감지
+        - 현재 파동 위치 추정
+        """
+        try:
+            c = ohlcv["close"].astype(float).values
+            if len(c) < 30:
+                return self._default_elliott()
+
+            # 피크/저점 감지 (5일 윈도우)
+            peaks  = []
+            troughs = []
+            for i in range(5, len(c)-5):
+                if c[i] == max(c[i-5:i+6]):
+                    peaks.append((i, c[i]))
+                if c[i] == min(c[i-5:i+6]):
+                    troughs.append((i, c[i]))
+
+            if len(peaks) < 2 or len(troughs) < 2:
+                return self._default_elliott()
+
+            # 최근 피크/저점
+            last_peak   = peaks[-1]
+            last_trough = troughs[-1]
+            cur         = float(c[-1])
+
+            # 파동 위치 추정
+            if last_peak[0] > last_trough[0]:
+                # 최근 고점이 저점보다 나중 → 상승 후 조정 중
+                retrace = (last_peak[1] - cur) / (last_peak[1] - last_trough[1] + 1e-9)
+                if retrace < 0.382:
+                    wave_pos = "5파동 (상승 지속)"
+                    score    = 75.0
+                elif retrace < 0.618:
+                    wave_pos = "조정 A/B파 (매수 기회)"
+                    score    = 60.0
+                else:
+                    wave_pos = "C파 조정 (추가 하락 주의)"
+                    score    = 35.0
+            else:
+                # 최근 저점이 고점보다 나중 → 하락 후 반등 중
+                recover = (cur - last_trough[1]) / (last_peak[1] - last_trough[1] + 1e-9)
+                if recover > 0.618:
+                    wave_pos = "3파동 (강한 상승)"
+                    score    = 80.0
+                elif recover > 0.382:
+                    wave_pos = "2파동 끝 (매수 시점)"
+                    score    = 65.0
+                else:
+                    wave_pos = "1파동 초기"
+                    score    = 55.0
+
+            return {
+                "elliott_wave_pos": wave_pos,
+                "elliott_score":    float(np.clip(score, 0, 100)),
+                "elliott_peak":     round(float(last_peak[1]), 2),
+                "elliott_trough":   round(float(last_trough[1]), 2),
+            }
+        except Exception:
+            return self._default_elliott()
+
+    # ── ★ CNN 패턴 (간이 딥러닝 대체) ──────────────────────────────
+    def _cnn_pattern(self, ohlcv: pd.DataFrame) -> dict:
+        """
+        CNN 패턴 인식 간이 버전
+        (실제 CNN 대신 정규화된 가격 패턴으로 유사 구현)
+        - 20일 가격 패턴을 표준화
+        - 과거 상승 패턴과 유사도 계산
+        - 컵핸들 / 이중바닥 / VCP 패턴 감지
+        """
+        try:
+            c = ohlcv["close"].astype(float).values
+            if len(c) < 25:
+                return {"cnn_score": 50.0, "cnn_pattern": "데이터부족"}
+
+            # 최근 20일 정규화 (0~1)
+            w = c[-20:]
+            mn, mx = w.min(), w.max()
+            if mx == mn:
+                return {"cnn_score": 50.0, "cnn_pattern": "횡보"}
+            norm_w = (w - mn) / (mx - mn)
+
+            score = 50.0
+            pattern = "없음"
+
+            # 컵핸들 패턴: U형 + 오른쪽 고점 근접
+            mid_min = float(norm_w[8:12].min())
+            left    = float(norm_w[:5].mean())
+            right   = float(norm_w[15:].mean())
+            if mid_min < 0.3 and left > 0.6 and right > 0.7:
+                score   = 82.0
+                pattern = "컵핸들"
+
+            # 이중바닥 (W패턴)
+            elif (float(norm_w[3:7].min()) < 0.25 and
+                  float(norm_w[13:17].min()) < 0.25 and
+                  float(norm_w[8:12].max()) > 0.5):
+                score   = 78.0
+                pattern = "이중바닥(W)"
+
+            # VCP (Volatility Contraction Pattern)
+            vols = [abs(w[i]-w[i-1]) for i in range(1, len(w))]
+            if len(vols) >= 10:
+                early_vol = float(np.mean(vols[:10]))
+                late_vol  = float(np.mean(vols[-5:]))
+                if late_vol < early_vol * 0.5 and float(norm_w[-1]) > 0.7:
+                    score   = max(score, 75.0)
+                    pattern = "VCP(변동성수축)"
+
+            # 상승 추세 (우상향)
+            slope = float(np.polyfit(range(len(norm_w)), norm_w, 1)[0])
+            if slope > 0.02:
+                score += 10
+                if pattern == "없음":
+                    pattern = "상승추세"
+            elif slope < -0.02:
+                score -= 10
+                if pattern == "없음":
+                    pattern = "하락추세"
+
+            return {
+                "cnn_score":   float(np.clip(score, 0, 100)),
+                "cnn_pattern": pattern,
+            }
+        except Exception:
+            return {"cnn_score": 50.0, "cnn_pattern": "오류"}
+
+    # ── ★ 캔들 패턴 인식 (15가지) ─────────────────────────────────
+
+    def _candle_patterns(self, ohlcv: pd.DataFrame) -> dict:
+        if len(ohlcv) < 3:
+            return self._default_candle()
+
+        o = ohlcv["open"].astype(float)
+        h = ohlcv["high"].astype(float)
+        l = ohlcv["low"].astype(float)
+        c = ohlcv["close"].astype(float)
+
+        o1,o2,o3 = float(o.iloc[-3]), float(o.iloc[-2]), float(o.iloc[-1])
+        h1,h2,h3 = float(h.iloc[-3]), float(h.iloc[-2]), float(h.iloc[-1])
+        l1,l2,l3 = float(l.iloc[-3]), float(l.iloc[-2]), float(l.iloc[-1])
+        c1,c2,c3 = float(c.iloc[-3]), float(c.iloc[-2]), float(c.iloc[-1])
+
+        body3  = abs(c3 - o3)
+        body2  = abs(c2 - o2)
+        body1  = abs(c1 - o1)
+        range3 = h3 - l3 + 1e-9
+        range2 = h2 - l2 + 1e-9
+
+        upper3 = h3 - max(o3, c3)
+        lower3 = min(o3, c3) - l3
+        upper2 = h2 - max(o2, c2)
+        lower2 = min(o2, c2) - l2
+
+        p = {}
+
+        # 단일 캔들
+        p["hammer"]        = int(lower3 >= body3*2 and upper3 <= body3*0.3 and c3 > o3)
+        p["inv_hammer"]    = int(upper3 >= body3*2 and lower3 <= body3*0.3 and c3 > o3)
+        p["doji"]          = int(body3 <= range3 * 0.05)
+        p["marubozu_bull"] = int(c3 > o3 and body3 >= range3*0.85 and body3 > 0)
+        p["marubozu_bear"] = -int(c3 < o3 and body3 >= range3*0.85 and body3 > 0)
+        p["shooting_star"] = -int(upper3 >= body3*2 and lower3 <= body3*0.3 and c3 < o3)
+
+        # 2개 캔들
+        p["bullish_engulf"] = int(c2 < o2 and c3 > o3 and o3 <= c2 and c3 >= o2)
+        p["bearish_engulf"] = -int(c2 > o2 and c3 < o3 and o3 >= c2 and c3 <= o2)
+        p["bullish_harami"] = int(c2 < o2 and c3 > o3 and o3 > c2 and c3 < o2)
+        p["gap_up"]         = int(l3 > h2)
+        p["gap_down"]       = -int(h3 < l2)
+
+        # 3개 캔들
+        p["morning_star"]    = int(c1 < o1 and body2 <= range2*0.3 and c3 > o3 and c3 > (o1+c1)/2)
+        p["evening_star"]    = -int(c1 > o1 and body2 <= range2*0.3 and c3 < o3 and c3 < (o1+c1)/2)
+        p["three_soldiers"]  = int(c1>o1 and c2>o2 and c3>o3 and c3>c2>c1 and o2>o1 and o3>o2)
+        p["three_crows"]     = -int(c1<o1 and c2<o2 and c3<o3 and c3<c2<c1 and o2<o1 and o3<o2)
+
+        bull = sum(v for v in p.values() if v > 0)
+        bear = sum(v for v in p.values() if v < 0)
+        candle_score = float(np.clip(50.0 + bull*8 + bear*8, 0, 100))
+        detected     = [k for k, v in p.items() if v != 0]
+
+        return {
+            **{f"cp_{k}": v for k, v in p.items()},
+            "candle_score":   candle_score,
+            "candle_pattern": ", ".join(detected) if detected else "없음",
+            "bull_patterns":  bull,
+            "bear_patterns":  abs(bear),
+        }
+
+    # ── ★ 거래량 프로파일 ─────────────────────────────────────────
+
+    def _volume_profile(self, ohlcv: pd.DataFrame) -> dict:
+        """POC / VAH / VAL 계산 (60일 기준)"""
+        try:
+            close  = ohlcv["close"].astype(float)
+            volume = ohlcv["volume"].astype(float)
+            period = min(60, len(ohlcv))
+            c, v   = close.tail(period), volume.tail(period)
+
+            p_min, p_max = c.min(), c.max()
+            if p_max == p_min:
+                return self._default_volume_profile()
+
+            bins         = np.linspace(p_min, p_max, 21)
+            vol_by_price = np.zeros(20)
+            for price, vol in zip(c, v):
+                idx = min(int((price - p_min) / (p_max - p_min) * 20), 19)
+                vol_by_price[idx] += vol
+
+            poc_idx   = np.argmax(vol_by_price)
+            poc_price = (bins[poc_idx] + bins[poc_idx+1]) / 2
+
+            # VAH / VAL (70% 거래량 구간)
+            sorted_idx = np.argsort(vol_by_price)[::-1]
+            cum, va    = 0.0, []
+            for idx in sorted_idx:
+                cum += vol_by_price[idx]
+                va.append(idx)
+                if cum >= vol_by_price.sum() * 0.70:
+                    break
+            vah = (bins[max(va)+1] + bins[max(va)]) / 2
+            val = (bins[min(va)]   + bins[min(va)+1]) / 2
+
+            cur_price  = float(close.iloc[-1])
+            poc_diff   = (cur_price / poc_price - 1) * 100
+            above_poc  = int(cur_price > poc_price)
+            in_va      = int(val <= cur_price <= vah)
+
+            vp_score = 50.0
+            if above_poc:      vp_score += 15
+            if in_va:          vp_score += 10
+            if poc_diff > 5:   vp_score += 10
+            elif poc_diff < -10: vp_score -= 15
+
+            return {
+                "vp_poc":       round(poc_price, 0),
+                "vp_vah":       round(vah, 0),
+                "vp_val":       round(val, 0),
+                "vp_poc_diff":  round(poc_diff, 2),
+                "vp_above_poc": above_poc,
+                "vp_in_va":     in_va,
+                "vp_score":     float(np.clip(vp_score, 0, 100)),
+            }
+        except Exception:
+            return self._default_volume_profile()
+
+    # ── ★ 리스크 관리 지표 ────────────────────────────────────────
+
+    def _risk_metrics(self, ohlcv: pd.DataFrame, atr: float, cur_price: float) -> dict:
+        """
+        변동성 / MDD / 샤프비율 / ATR 기반 손절익절 / 켈리공식
+        """
+        try:
+            close   = ohlcv["close"].astype(float)
+            returns = close.pct_change().dropna()
+
+            # 20일 연환산 변동성
+            vol_20d = float(returns.tail(20).std() * np.sqrt(252) * 100)
+
+            # 60일 샤프비율 (무위험 연 3.5% 가정)
+            rf_daily  = 0.035 / 252
+            ret_60d   = returns.tail(60)
+            sharpe_60 = float(
+                (ret_60d.mean() - rf_daily) / (ret_60d.std() + 1e-9) * np.sqrt(252)
+            ) if len(ret_60d) >= 20 else 0.0
+
+            # 60일 MDD
+            p60    = close.tail(60)
+            peak   = p60.expanding().max()
+            mdd_60 = float(((p60 - peak) / (peak + 1e-9) * 100).min())
+
+            # 20일 승률
+            win_rate = float((returns.tail(20) > 0).mean() * 100)
+
+            # ATR 기반 손절(2ATR) / 익절(3ATR)
+            atr_stop   = round(cur_price - atr * 2, 0)
+            atr_target = round(cur_price + atr * 3, 0)
+            atr_ratio  = round((atr_target - cur_price) / (cur_price - atr_stop + 1e-9), 2)
+
+            # 하프 켈리공식
+            b      = atr_ratio if atr_ratio > 0 else 1.5
+            p      = win_rate / 100
+            kelly  = float(np.clip((b*p - (1-p)) / (b + 1e-9), 0, 0.25))
+            half_kelly = round(kelly * 0.5 * 100, 1)
+
+            # 리스크 점수
+            risk_score = 50.0
+            if   sharpe_60 > 1.0:  risk_score += 20
+            elif sharpe_60 > 0.5:  risk_score += 10
+            elif sharpe_60 < 0:    risk_score -= 15
+            if   mdd_60 > -10:     risk_score += 10
+            elif mdd_60 < -20:     risk_score -= 15
+            if   vol_20d < 20:     risk_score += 10
+            elif vol_20d > 40:     risk_score -= 10
+            if   win_rate > 55:    risk_score += 10
+            elif win_rate < 45:    risk_score -= 10
+
+            return {
+                "vol_20d":     round(vol_20d, 2),
+                "sharpe_60":   round(sharpe_60, 2),
+                "mdd_60":      round(mdd_60, 2),
+                "win_rate_20": round(win_rate, 1),
+                "atr_stop":    atr_stop,
+                "atr_target":  atr_target,
+                "atr_ratio":   atr_ratio,
+                "half_kelly":  half_kelly,
+                "risk_score":  float(np.clip(risk_score, 0, 100)),
+            }
+        except Exception:
+            return self._default_risk_metrics()
+
+    # ── ★ 매수/매도 압력 (OHLCV 기반) ────────────────────────────
+
+    def _order_pressure(self, ohlcv: pd.DataFrame) -> dict:
+        """
+        실시간 호가 없을 때 OHLCV로 매수압력 추정
+        KIS API 연결 시 get_orderbook() 결과로 대체됨
+        """
+        try:
+            close  = ohlcv["close"].astype(float)
+            high   = ohlcv["high"].astype(float)
+            low    = ohlcv["low"].astype(float)
+            open_  = ohlcv["open"].astype(float)
+            volume = ohlcv["volume"].astype(float)
+
+            # 매수 압력: (종가-저가)/(고가-저가) → 1에 가까울수록 매수 강
+            buy_p  = float(((close - low) / (high - low + 1e-9)).tail(5).mean())
+            sell_p = float(((high - close) / (high - low + 1e-9)).tail(5).mean())
+
+            # 거래량 방향성
+            up_vol    = float(volume[close > open_].sum())
+            down_vol  = float(volume[close < open_].sum())
+            vol_ratio = round(up_vol / (down_vol + 1e-9), 2)
+
+            pressure_score = 50.0
+            pressure_score += (buy_p - 0.5) * 40
+            pressure_score += float(np.clip((vol_ratio - 1) * 10, -15, 15))
+
+            return {
+                "buy_pressure":   round(buy_p, 3),
+                "sell_pressure":  round(sell_p, 3),
+                "vol_ratio":      vol_ratio,
+                "pressure_score": float(np.clip(pressure_score, 0, 100)),
+                "ob_score":       50.0,   # KIS 호가 없을 때 기본값
+                "ob_pressure":    1.0,
+            }
+        except Exception:
+            return {
+                "buy_pressure": 0.5, "sell_pressure": 0.5,
+                "vol_ratio": 1.0, "pressure_score": 50.0,
+                "ob_score": 50.0, "ob_pressure": 1.0,
+            }
+
+    # ── 전체 계산 ─────────────────────────────────────────────────
+
+    def _calc_row(self, ohlcv, row):
+        close = ohlcv["close"].astype(float)
+
+        rsi                                       = self._rsi(close)
+        macd, macd_sig, macd_hist, macd_cross     = self._macd(close)
+        bb_pct, bb_width, bb_upper, bb_lower      = self._bollinger(close)
+        mom_score, ma5, ma20, ma60, m5, m20, m60  = self._momentum(close)
+        vb_signal = self._volatility_breakout(ohlcv)
+        atr       = self._atr(ohlcv)
+
+        candle   = self._candle_patterns(ohlcv)
+        vp       = self._volume_profile(ohlcv)
+        pressure = self._order_pressure(ohlcv)
+
+        # ★ 신규 지표
+        stoch_k, stoch_d, stoch_score = self._stochastic(ohlcv)
+        cci_val, cci_score            = self._cci(ohlcv)
+        mfi_val, mfi_score            = self._mfi(ohlcv)
+        obv_data                      = self._obv_advanced(ohlcv)
+        vwap_data                     = self._vwap_advanced(ohlcv)
+        # ★ v7.2 신규 지표
+        ichi_data                     = self._ichimoku(ohlcv)
+        fib_data                      = self._fibonacci(ohlcv)
+        elliott_data                  = self._elliott_wave(ohlcv)
+        cnn_data                      = self._cnn_pattern(ohlcv)
+
+        cur_price  = float(close.iloc[-1])
+        prev_close = float(close.iloc[-2]) if len(close) > 1 else cur_price
+        risk       = self._risk_metrics(ohlcv, atr, cur_price)
+
+        # ATR 기반 가격 계산
+        buy_price    = round(prev_close * 0.995, 0)
+        exp_return   = max(1.5, min(8.0, atr / cur_price * 200)) if cur_price > 0 else 3.0
+        target_price = risk["atr_target"] if risk["atr_target"] > buy_price \
+                       else round(buy_price * (1 + exp_return / 100), 0)
+        stop_price   = risk["atr_stop"] if 0 < risk["atr_stop"] < buy_price \
+                       else round(buy_price * 0.97, 0)
+
+        return {
+            # 기존
+            "rsi": rsi, "macd": macd, "macd_signal": macd_sig,
+            "macd_hist": macd_hist, "macd_cross": macd_cross,
+            "bb_pct": bb_pct, "bb_width": bb_width,
+            "bb_upper": bb_upper, "bb_lower": bb_lower,
+            "ma5": ma5, "ma20": ma20, "ma60": ma60,
+            "momentum_score": mom_score,
+            "mom_5d": m5, "mom_20d": m20, "mom_60d": m60,
+            "vb_signal": vb_signal, "atr": atr,
+            "buy_price": buy_price, "target_price": target_price,
+            "stop_price": stop_price, "expected_return": exp_return,
+            # 신규
+            **candle, **vp, **pressure, **risk,
+            # ★ v7.0 신규 지표
+            "stoch_k": stoch_k, "stoch_d": stoch_d, "stoch_score": stoch_score,
+            "cci": cci_val, "cci_score": cci_score,
+            "mfi": mfi_val, "mfi_score": mfi_score,
+            **obv_data, **vwap_data,
+            # ★ v7.2 신규
+            **ichi_data, **fib_data, **elliott_data, **cnn_data,
+        }
+
+    # ── 기본값 ────────────────────────────────────────────────────
+
+    def _default_candle(self):
+        keys = ["hammer","inv_hammer","doji","marubozu_bull","marubozu_bear",
+                "shooting_star","bullish_engulf","bearish_engulf","bullish_harami",
+                "gap_up","gap_down","morning_star","evening_star",
+                "three_soldiers","three_crows"]
+        return {
+            **{f"cp_{k}": 0 for k in keys},
+            "candle_score": 50.0, "candle_pattern": "없음",
+            "bull_patterns": 0,   "bear_patterns": 0,
+        }
+
+    def _default_volume_profile(self):
+        return {
+            "vp_poc": 0.0, "vp_vah": 0.0, "vp_val": 0.0,
+            "vp_poc_diff": 0.0, "vp_above_poc": 0,
+            "vp_in_va": 0, "vp_score": 50.0,
+        }
+
+    def _default_risk_metrics(self):
+        return {
+            "vol_20d": 0.0, "sharpe_60": 0.0, "mdd_60": 0.0,
+            "win_rate_20": 50.0, "atr_stop": 0.0, "atr_target": 0.0,
+            "atr_ratio": 1.5, "half_kelly": 5.0, "risk_score": 50.0,
+        }
+
+
+    def _default_ichimoku(self) -> dict:
+        return {
+            "ichi_tenkan":      0.0,
+            "ichi_kijun":       0.0,
+            "ichi_above_cloud": 0,
+            "ichi_below_cloud": 0,
+            "ichi_in_cloud":    0,
+            "ichi_golden":      0,
+            "ichi_dead":        0,
+            "ichi_score":       50.0,
+        }
+
+    def _default_fibonacci(self) -> dict:
+        return {
+            "fib_0":               0.0,
+            "fib_236":             0.0,
+            "fib_382":             0.0,
+            "fib_500":             0.0,
+            "fib_618":             0.0,
+            "fib_786":             0.0,
+            "fib_100":             0.0,
+            "fib_pct":             50.0,
+            "fib_nearest_support": 0.0,
+            "fib_nearest_resist":  0.0,
+            "fib_at_golden":       0,
+            "fib_score":           50.0,
+        }
+
+    def _default_elliott(self) -> dict:
+        return {
+            "elliott_wave_pos": "데이터부족",
+            "elliott_score":    50.0,
+            "elliott_peak":     0.0,
+            "elliott_trough":   0.0,
+        }
+
+    def _default_indicators(self):
+        d = {
+            "rsi": 0.0, "macd": 0.0, "macd_signal": 0.0,
+            "macd_hist": 0.0, "macd_cross": 0,
+            "bb_pct": 0.5, "bb_width": 0.0, "bb_upper": 0.0, "bb_lower": 0.0,
+            "ma5": 0.0, "ma20": 0.0, "ma60": 0.0, "momentum_score": 0,
+            "mom_5d": 0.0, "mom_20d": 0.0, "mom_60d": 0.0,
+            "vb_signal": 0, "atr": 0.0,
+            "buy_price": 0.0, "target_price": 0.0,
+            "stop_price": 0.0, "expected_return": 3.0,
+            "buy_pressure": 0.5, "sell_pressure": 0.5,
+            "vol_ratio": 1.0, "pressure_score": 50.0,
+            "ob_score": 50.0, "ob_pressure": 1.0,
+        }
+        d.update(self._default_candle())
+        d.update(self._default_volume_profile())
+        d.update(self._default_risk_metrics())
+        # ★ v7.0 신규
+        d.update({
+            "stoch_k":50.0,"stoch_d":50.0,"stoch_score":50.0,
+            "cci":0.0,"cci_score":50.0,
+            "mfi":50.0,"mfi_score":50.0,
+            "obv_slope":0.0,"obv_divergence":0,"obv_score":50.0,
+            "vwap":0.0,"vwap_deviation":0.0,"vwap_above":0,"vwap_score":50.0,
+        })
+        d.update(self._default_ichimoku())
+        d.update(self._default_fibonacci())
+        d.update(self._default_elliott())
+        d.update({"cnn_score":50.0,"cnn_pattern":"없음"})
+        return d

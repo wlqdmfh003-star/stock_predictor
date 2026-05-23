@@ -1,0 +1,502 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
+
+
+class SectorAnalysis:
+    """
+    v7.0 섹터/업종 분석
+    - pykrx 완전 제거 (자체 섹터 매핑)
+    - 종목 수 3배 확장
+    - 방산/조선 섹터 추가
+    - 5일 vs 20일 모멘텀 비교로 섹터 로테이션 감지
+    ★ 신규: 섹터 로테이션 전략 (강한 섹터 → 가중치 자동 UP)
+    ★ 신규: 섹터 강도 순위 (TOP3 섹터 집중 추천)
+    ★ 신규: 섹터 모멘텀 기반 종목 점수 가중치 자동 조정
+    """
+
+    SECTORS = {
+        "반도체": [
+            "삼성전자","SK하이닉스","DB하이텍","하나마이크론","리노공업",
+            "원익IPS","피에스케이","HPSP","에스앤에스텍","ISC",
+            "한미반도체","티씨케이","SFA반도체","코미코","에프에스티",
+            "심텍","대덕전자","인텍플러스","오로스테크놀로지","네패스",
+            "솔브레인","후성","SK실트론","웨이퍼","디아이",
+            "이수페타시스","파두","에이직랜드","칩스앤미디어","오픈엣지",
+            "퓨리오사AI","사피온","넥스트칩","아나패스","실리콘마이터스",
+            "어보브반도체","동운아나텍","에이디테크놀로지","가온칩스","텔레칩스",
+            # ★ 추가 반도체 장비/소재
+            "원익QnC","유진테크","GST","케이씨텍","티씨케이",
+            "하나마이크론","테크윙","이오테크닉스","레이저쎌","파크시스템스",
+            "LG이노텍","삼성전기","대덕전자","심텍",
+        ],
+        "2차전지": [
+            "LG에너지솔루션","삼성SDI","SK이노베이션","에코프로","에코프로비엠",
+            "포스코퓨처엠","엘앤에프","천보","나노신소재","일진머티리얼즈",
+            "엔켐","솔루스첨단소재","코스모신소재","동화기업","피엔티",
+            "씨아이에스","에스엠랩","원통형배터리","비에이치","명성티엔에스",
+            "에코앤드림","DI동일","세방전지","파워로직스","리튬","이브이첨단소재",
+        ],
+        "바이오/제약": [
+            "삼성바이오로직스","셀트리온","유한양행","한미약품","종근당",
+            "대웅제약","HLB","알테오젠","에스티팜","보령","동국제약",
+            "일동제약","광동제약","JW중외제약","녹십자","한독","동아에스티",
+            "제넥신","메디톡스","코오롱티슈진","테고사이언스","비씨월드제약",
+            "파멥신","압타머사이언스","오스코텍","지씨셀","ABL바이오",
+            "클래시스","인바디","뷰웍스","바텍","오스템임플란트",
+            "덴티움","레이","디오","씨젠","수젠텍","SD바이오센서",
+            "SK바이오팜","SK바이오사이언스","한미사이언스","일동홀딩스",
+            "동아에스티","제일약품","유한킴벌리",
+            # ★ 추가
+            "리가켐바이오","파마리서치","에스티팜","오리온바이오로직스",
+            "바이오플러스","동화약품","보령","일양약품","한국비엔씨",
+            "지씨셀","ABL바이오","레고켐바이오","올릭스","에이비엘바이오",
+            "메디포스트","차바이오텍","강스템바이오텍","테고사이언스",
+            "비씨월드제약","파멥신","압타머사이언스","오스코텍",
+        ],
+        "자동차/부품": [
+            "현대차","기아","현대모비스","한온시스템","만도",
+            "현대위아","HL만도","성우하이텍","세종공업","평화정공",
+            "모베이스","서연이화","화신","인지컨트롤스","영화테크",
+            "S&T모티브","에스엘","삼보모터스","동원금속","코다코",
+        ],
+        "IT/플랫폼": [
+            "카카오","NAVER","네이버","크래프톤","넥슨",
+            "엔씨소프트","카카오게임즈","펄어비스","컴투스","위메이드",
+            "카카오뱅크","카카오페이","KG모빌리언스","한국전자금융","다날",
+            "NHN","NHN한국사이버결제","메가스터디교육","이크레더블",
+            "넷마블","데브시스터즈","게임빌","조이시티","웹젠",
+            "카카오엔터프라이즈","두나무","빗썸","업비트","야놀자",
+            # ★ 전자/가전 추가
+            "LG전자","LG이노텍","LG디스플레이","LG유플러스",
+            "SK텔레콤","KT","KT&G","삼성SDS","삼성전기",
+            "SK바이오팜","SK바이오사이언스",
+            "현대일렉트릭","LS일렉트릭","LS","LS전선",
+            "코웨이","쿠쿠홀딩스","위니아","쿠쿠전자",
+        ],
+        "방산": [
+            "한화에어로스페이스","LIG넥스원","현대로템","한국항공우주","빅텍",
+            "퍼스텍","스페코","오르비텍","휴니드","한화시스템",
+            "풍산","삼성테크윈","한화","SNT모티브",
+            "HGH로보틱스","한화비전","이엠코리아","빅텍","휴니드",
+            "한양디지텍","세트렉아이","켄코아에어로스페이스","컨텍","이노뎁",
+        ],
+        "조선": [
+            "한화오션","HD현대중공업","삼성중공업","HD현대미포조선","대우조선해양",
+            "HD현대","HD현대인프라코어","케이조선","HJ중공업","세진중공업",
+            "성동조선","STX조선해양","현대삼호중공업","한진중공업","조광ILI",
+        ],
+        "금융": [
+            "KB금융","신한지주","하나금융지주","우리금융지주","기업은행",
+            "삼성생명","삼성화재","미래에셋","키움증권","NH투자증권",
+            "한국금융지주","DB손해보험","현대해상","메리츠금융지주","교보생명",
+            "BNK금융지주","DGB금융지주","JB금융지주","카카오뱅크","케이뱅크",
+        ],
+        "화학": [
+            "LG화학","롯데케미칼","금호석유","한화솔루션","OCI",
+            "효성화학","SKC","대한유화","한화임팩트","KG케미칼",
+            "금양","이수화학","태광산업","삼성정밀화학","동성화인텍",
+        ],
+        "철강/소재": [
+            "POSCO홀딩스","현대제철","고려아연","풍산","세아베스틸",
+            "동국제강","KG스틸","포스코스틸리온","세아특수강","성일하이텍",
+            "영풍","고려제강","동원시스템즈","화성밸브","태웅",
+            "포스코","POSCO","LS머트리얼즈","LS","LS전선","LS일렉트릭",
+            "풍산홀딩스","서원","대창","한국철강","동일제강",
+        ],
+        "건설/부동산": [
+            "삼성물산","현대건설","GS건설","DL이앤씨","HDC현대산업개발",
+            "대우건설","태영건설","호반건설","신세계건설","효성중공업",
+            "두산건설","코오롱글로벌","한신공영","계룡건설","동부건설",
+            # ★ 추가
+            "서희건설","일성건설","금호건설","한라","중흥건설",
+            "HJ중공업","SH공사","KCC건설","우미건설","반도건설",
+            "아이에스동서","대방건설","모아건설","SM상선","세보엠이씨",
+            "흥구석유","SGC에너지","보성파워텍","화성밸브","에스와이",
+        ],
+        "에너지": [
+            "SK이노베이션","S-Oil","GS","한국전력","한국가스공사",
+            "SK가스","E1","한국지역난방공사","STX에너지솔루션","에스에너지",
+            "한화솔루션","OCI","신성이엔지","에스와이","SK오케이",
+            "두산에너빌리티","두산퓨얼셀","한전기술","한전KPS","우진",
+            "비에이치아이","보성파워텍","대창솔루션","에스에너지",
+        ],
+        "엔터/미디어": [
+            "하이브","에스엠","JYP","와이지엔터테인먼트","카카오엔터",
+            "CJ ENM","스튜디오드래곤","SBS","MBC","KBS",
+            "쇼박스","NEW","덱스터","위지윅스튜디오","버킷스튜디오",
+            "SM C&C","FNC엔터","큐브엔터","플레이어스엔터","판타지오",
+        ],
+        "로봇/자동화": [
+            "레인보우로보틱스","두산로보틱스","현대로보틱스","유진로봇",
+            "로보티즈","티로보틱스","에스피지","나인봇","클로봇",
+            "원익로보틱스","한화로보틱스","도구공간","뉴로메카","한컴로보틱스",
+        ],
+        "운송/물류": [
+            "대한항공","아시아나항공","제주항공","진에어","에어부산",
+            "티웨이항공","에어서울","이스타항공","플라이강원",
+            "CJ대한통운","한진","한진칼","롯데글로벌로지스","세방",
+            "현대글로비스","HMM","팬오션","대한해운","흥아해운",
+            "위너스","SG글로벌","유수홀딩스","천일고속",
+        ],
+        "ETF/인덱스": [
+            "KODEX","TIGER","KBSTAR","ARIRANG","HANARO",
+            "KOSEF","SOL","ACE","PLUS","RISE","FOCUS",
+            "TIMEFOLIO","SMART","TREX","WON","BNK",
+            "WOORI","TRUSTON","ITOUCH","SYNERGY",
+        ],
+        "유통/소비": [
+            "롯데쇼핑","신세계","이마트","현대백화점","GS리테일",
+            "BGF리테일","CJ제일제당","오리온","농심","롯데칠성",
+            "하이트진로","무학","신라면세점","호텔신라","파라다이스",
+            # ★ 뷰티/화장품 추가
+            "에이피알","아모레퍼시픽","LG생활건강","코스맥스","한국콜마",
+            "클리오","토니모리","잇츠한불","에이블씨엔씨","애경산업",
+            "파마리서치프로","브이티","실리콘투","네오팜","제이준코스메틱",
+            "스킨푸드","더마펌","코스메카코리아","씨앤씨인터내셔널",
+            "마녀공장","에이피알","퍼블리시스","APR","연우",
+        ],
+    }
+
+    # ★ yfinance 영문 sector → 한국어 변환 테이블
+    YF_SECTOR_MAP = {
+        "Technology":             "반도체",
+        "Communication Services": "IT/플랫폼",
+        "Consumer Cyclical":      "유통/소비",
+        "Consumer Defensive":     "유통/소비",
+        "Healthcare":             "바이오/제약",
+        "Financial Services":     "금융",
+        "Financial":              "금융",
+        "Basic Materials":        "철강/소재",
+        "Materials":              "철강/소재",
+        "Energy":                 "에너지",
+        "Utilities":              "에너지",
+        "Real Estate":            "건설/부동산",
+        "Industrials":            "운송/물류",
+        "Consumer":               "유통/소비",
+    }
+
+    YF_INDUSTRY_MAP = {
+        "Semiconductors":                     "반도체",
+        "Semiconductor Equipment & Materials": "반도체",
+        "Electronic Components":              "반도체",
+        "Scientific & Technical Instruments": "반도체",
+        "Consumer Electronics":               "IT/플랫폼",
+        "Software—Application":               "IT/플랫폼",
+        "Internet Content & Information":     "IT/플랫폼",
+        "Electronic Gaming & Multimedia":     "IT/플랫폼",
+        "Auto Manufacturers":                 "자동차/부품",
+        "Auto Parts":                         "자동차/부품",
+        "Drug Manufacturers—General":         "바이오/제약",
+        "Drug Manufacturers—Specialty & Generic": "바이오/제약",
+        "Biotechnology":                      "바이오/제약",
+        "Medical Devices":                    "바이오/제약",
+        "Medical Instruments & Supplies":     "바이오/제약",
+        "Diagnostics & Research":             "바이오/제약",
+        "Banks—Regional":                     "금융",
+        "Banks—Diversified":                  "금융",
+        "Insurance—Life":                     "금융",
+        "Insurance—Diversified":              "금융",
+        "Capital Markets":                    "금융",
+        "Asset Management":                   "금융",
+        "Steel":                              "철강/소재",
+        "Aluminum":                           "철강/소재",
+        "Copper":                             "철강/소재",
+        "Chemicals":                          "화학",
+        "Specialty Chemicals":                "화학",
+        "Oil & Gas Integrated":               "에너지",
+        "Oil & Gas Refining & Marketing":     "에너지",
+        "Oil & Gas E&P":                      "에너지",
+        "Utilities—Regulated Electric":       "에너지",
+        "Utilities—Renewable":                "에너지",
+        "Aerospace & Defense":                "방산",
+        "Residential Construction":           "건설/부동산",
+        "Engineering & Construction":         "건설/부동산",
+        "Entertainment":                      "엔터/미디어",
+        "Shipping & Ports":                   "운송/물류",
+        "Airlines":                           "운송/물류",
+        "Trucking":                           "운송/물류",
+        "Marine Shipping":                    "조선",
+        "Shipbuilding":                       "조선",
+        "Specialty Industrial Machinery":     "로봇/자동화",
+        "Farm & Heavy Construction Machinery":"로봇/자동화",
+        "Electrical Equipment & Parts":       "IT/플랫폼",
+        "Telecom Services":                   "IT/플랫폼",
+        "Grocery Stores":                     "유통/소비",
+        "Discount Stores":                    "유통/소비",
+        "Apparel Retail":                     "유통/소비",
+        "Apparel Manufacturing":              "유통/소비",
+        "Packaged Foods":                     "유통/소비",
+        "Beverages—Brewers":                  "유통/소비",
+        "Lodging":                            "유통/소비",
+        "Travel Services":                    "유통/소비",
+        "Recreational Vehicles":              "자동차/부품",
+        "Secondary storage":                  "반도체",
+        "Computer Hardware":                  "반도체",
+    }
+
+    def __init__(self):
+        self.today = datetime.now().strftime("%Y%m%d")
+        # yfinance 섹터 캐시 (코드 → 한국어 섹터)
+        self._yf_sector_cache: dict = {}
+
+    def analyze(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        # ★ yfinance 섹터 자동 수집 (코드 기반)
+        self._fetch_yf_sectors(df)
+        # 섹터 결정: yfinance 캐시 우선 → 수동 사전 폴백
+        df["sector"] = df.apply(
+            lambda row: self._get_sector_smart(
+                str(row.get("code","")),
+                str(row.get("name",""))
+            ), axis=1
+        )
+
+        # 섹터별 5일/20일 모멘텀 계산 (로테이션 감지)
+        sector_stats = self._calc_sector_stats(df)
+
+        df["sector_score"] = df.apply(
+            lambda row: self._calc_score(row, sector_stats), axis=1
+        )
+        df["sector_rotation"] = df["sector"].apply(
+            lambda s: sector_stats.get(s, {}).get("rotation_signal", "중립")
+        )
+        return df
+
+    def _get_sector(self, name: str) -> str:
+        # ★ ETF 먼저 감지
+        etf_keywords = [
+            "KODEX","TIGER","KBSTAR","ARIRANG","HANARO",
+            "KOSEF","SOL ","ACE ","PLUS ","RISE ","FOCUS",
+            "TIMEFOLIO","SMART","TREX","WON ","BNK ",
+        ]
+        if any(kw in name for kw in etf_keywords):
+            return "ETF/인덱스"
+
+        # 1순위: 완전 일치
+        for sector, stocks in self.SECTORS.items():
+            if sector == "ETF/인덱스":
+                continue
+            if name in stocks:
+                return sector
+
+        # 2순위: 부분 매칭
+        for sector, stocks in self.SECTORS.items():
+            if sector == "ETF/인덱스":
+                continue
+            if any(stock in name for stock in stocks):
+                return sector
+
+        return "기타"
+
+    def _fetch_yf_sectors(self, df: pd.DataFrame):
+        """yfinance로 섹터 자동 수집 (캐시 사용)"""
+        try:
+            import yfinance as yf
+            codes = df["code"].tolist() if "code" in df.columns else []
+            for code in codes:
+                code = str(code)
+                if not code or code in self._yf_sector_cache:
+                    continue
+                for suffix in [".KS", ".KQ"]:
+                    try:
+                        info = yf.Ticker(f"{code}{suffix}").info
+                        if not info:
+                            continue
+                        sector_en   = info.get("sector",   "") or ""
+                        industry_en = info.get("industry", "") or ""
+                        # industry 우선 (더 정밀) → sector 폴백
+                        kor = (self.YF_INDUSTRY_MAP.get(industry_en) or
+                               self.YF_SECTOR_MAP.get(sector_en) or "")
+                        if kor:
+                            self._yf_sector_cache[code] = kor
+                            break
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    def _get_sector_smart(self, code: str, name: str) -> str:
+        """yfinance 캐시 1순위 → 수동 사전 2순위"""
+        # 1순위: yfinance 캐시
+        if code and code in self._yf_sector_cache:
+            return self._yf_sector_cache[code]
+        # 2순위: 수동 사전
+        return self._get_sector(name)
+
+    def _calc_sector_stats(self, df: pd.DataFrame) -> dict:
+        """섹터별 5일/20일 모멘텀 비교 → 로테이션 신호 생성"""
+        stats = {}
+        for sector in list(self.SECTORS.keys()) + ["기타"]:
+            sdf = df[df["sector"] == sector]
+            if len(sdf) == 0:
+                stats[sector] = {
+                    "avg_change": 0.0, "avg_momentum": 50.0,
+                    "stock_count": 0, "rotation_signal": "중립",
+                    "momentum_5d": 0.0, "momentum_20d": 0.0,
+                }
+                continue
+
+            avg_change   = float(sdf["change_pct"].mean())       if "change_pct"    in sdf.columns else 0.0
+            avg_momentum = float(sdf["momentum_score"].mean())   if "momentum_score" in sdf.columns else 50.0
+
+            # 5일 vs 20일 모멘텀 (ohlcv 데이터 있을 때)
+            m5, m20 = self._extract_momentum(sdf)
+
+            # 로테이션 신호: 5일이 20일보다 강하면 "가속", 약하면 "둔화"
+            if   m5 > m20 + 1.0:  rotation = "🚀 가속"
+            elif m5 < m20 - 1.0:  rotation = "🔻 둔화"
+            else:                  rotation = "➡️ 중립"
+
+            stats[sector] = {
+                "avg_change":      avg_change,
+                "avg_momentum":    avg_momentum,
+                "stock_count":     len(sdf),
+                "rotation_signal": rotation,
+                "momentum_5d":     m5,
+                "momentum_20d":    m20,
+            }
+        return stats
+
+    def _extract_momentum(self, sdf: pd.DataFrame):
+        """ohlcv에서 5일/20일 수익률 계산"""
+        m5_list, m20_list = [], []
+        for _, row in sdf.iterrows():
+            ohlcv = row.get("ohlcv")
+            if ohlcv is None or len(ohlcv) < 21:
+                continue
+            close = ohlcv["close"].astype(float).values
+            if len(close) >= 6:
+                m5_list.append((close[-1] / close[-6] - 1) * 100)
+            if len(close) >= 21:
+                m20_list.append((close[-1] / close[-21] - 1) * 100)
+
+        m5  = float(np.mean(m5_list))  if m5_list  else 0.0
+        m20 = float(np.mean(m20_list)) if m20_list else 0.0
+        return m5, m20
+
+    def _calc_score(self, row, sector_stats: dict) -> float:
+        sector = row.get("sector", "기타")
+        data   = sector_stats.get(sector, {})
+        score  = 50.0
+
+        avg_mom = data.get("avg_momentum", 50.0)
+        avg_chg = data.get("avg_change",   0.0)
+        m5      = data.get("momentum_5d",  0.0)
+        m20     = data.get("momentum_20d", 0.0)
+        count   = data.get("stock_count",  0)
+
+        # 섹터 평균 모멘텀
+        score += (avg_mom - 50) * 0.3
+        # 섹터 평균 등락률
+        score += np.clip(avg_chg * 3, -15, 15)
+        # 5일 > 20일 이면 로테이션 가속 보너스
+        score += np.clip((m5 - m20) * 1.5, -10, 10)
+        # 섹터 내 종목 수 신뢰도
+        if count >= 3:
+            score += 5
+        # 개별 종목이 섹터 평균보다 강하면 보너스
+        own_chg = float(row.get("change_pct", 0))
+        if own_chg > avg_chg:
+            score += 5
+
+        return float(np.clip(score, 0, 100))
+
+    def get_sector_summary(self, df: pd.DataFrame) -> pd.DataFrame:
+        if "sector" not in df.columns:
+            return pd.DataFrame()
+        rows = []
+        for sector in list(self.SECTORS.keys()) + ["기타"]:
+            sdf = df[df["sector"] == sector]
+            if len(sdf) == 0:
+                continue
+            rows.append({
+                "섹터":        sector,
+                "종목수":       len(sdf),
+                "평균상승확률": round(sdf["rise_prob"].mean(), 1)    if "rise_prob"    in sdf.columns else 0,
+                "평균등락률":   round(sdf["change_pct"].mean(), 2)   if "change_pct"   in sdf.columns else 0,
+                "5일모멘텀":    round(sdf["momentum_score"].mean(),1) if "momentum_score" in sdf.columns else 0,
+                "로테이션":     sdf["sector_rotation"].iloc[0]        if "sector_rotation" in sdf.columns else "-",
+                "TOP종목":      str(sdf.sort_values("rise_prob", ascending=False).iloc[0]["name"])
+                                if "rise_prob" in sdf.columns and len(sdf) > 0 else "-",
+            })
+        return pd.DataFrame(rows).sort_values("평균상승확률", ascending=False)
+
+    # ══════════════════════════════════════════════════════════════
+    # ★ 섹터 로테이션 전략 v7.0
+    # ══════════════════════════════════════════════════════════════
+    def get_rotation_strategy(self, df: pd.DataFrame) -> dict:
+        """
+        섹터 로테이션 전략
+        - TOP3 섹터 자동 감지
+        - 강한 섹터 종목 가중치 UP
+        - 약한 섹터 종목 가중치 DOWN
+        반환: {종목코드: 가중치보정값}
+        """
+        if "sector" not in df.columns:
+            df = df.copy()
+            df["sector"] = df["name"].apply(self._get_sector)
+
+        sector_stats = self._calc_sector_stats(df)
+
+        # 섹터 강도 점수 계산
+        sector_strength = {}
+        for sector, stats in sector_stats.items():
+            m5  = stats.get("momentum_5d",  0)
+            m20 = stats.get("momentum_20d", 0)
+            cnt = stats.get("stock_count",  0)
+            avg = stats.get("avg_momentum", 50)
+            if cnt == 0:
+                continue
+            # 강도 = 5일모멘텀(40%) + 5vs20차이(30%) + 평균모멘텀(30%)
+            strength = m5*0.4 + (m5-m20)*0.3 + (avg-50)*0.3
+            sector_strength[sector] = round(float(strength), 2)
+
+        if not sector_strength:
+            return {"top3_sectors": [], "weight_adj": {}, "summary": "데이터 없음"}
+
+        # TOP3 / BOTTOM3 섹터 선정
+        sorted_sectors = sorted(sector_strength.items(), key=lambda x: x[1], reverse=True)
+        top3    = [s[0] for s in sorted_sectors[:3]]
+        bottom3 = [s[0] for s in sorted_sectors[-3:]]
+
+        # 종목별 가중치 보정값 계산
+        weight_adj = {}
+        for _, row in df.iterrows():
+            code   = str(row.get("code", ""))
+            sector = row.get("sector", "기타")
+            if   sector in top3:    weight_adj[code] = +15.0  # TOP 섹터 +15점
+            elif sector in bottom3: weight_adj[code] = -10.0  # 하위 섹터 -10점
+            else:                   weight_adj[code] =   0.0
+
+        return {
+            "top3_sectors":    top3,
+            "bottom3_sectors": bottom3,
+            "sector_strength": sector_strength,
+            "weight_adj":      weight_adj,
+            "summary": f"강세섹터: {' > '.join(top3[:3])} | "
+                       f"약세섹터: {' > '.join(bottom3[:3])}",
+        }
+
+    def apply_rotation_weight(self, df: pd.DataFrame,
+                              rotation: dict) -> pd.DataFrame:
+        """
+        섹터 로테이션 가중치를 종목 점수에 반영
+        total_score가 있을 때 호출
+        """
+        df     = df.copy()
+        adj    = rotation.get("weight_adj", {})
+        if not adj or "total_score" not in df.columns:
+            return df
+
+        new_scores = []
+        for _, row in df.iterrows():
+            code  = str(row.get("code", ""))
+            score = float(row.get("total_score", 50))
+            bonus = adj.get(code, 0.0)
+            new_scores.append(float(np.clip(score + bonus, 0, 100)))
+
+        df["total_score"] = new_scores
+        return df
