@@ -185,6 +185,35 @@ class MacroIndicators:
                 score += np.clip(-(oil_val - 70) * 0.2, -8, 8)
                 score += np.clip(-dxy_chg * 2, -6, 8)
 
+            # 항공: 유가(원가) + 환율 영향
+            elif sector == "항공":
+                # 유가 하락 = 항공 호재 (연료비 감소)
+                score += np.clip(-(oil_val - 70) * 0.3, -12, 10)
+                # 달러 강세 = 항공 악재 (달러 부채)
+                score += np.clip(-dxy_chg * 3, -10, 6)
+                # VIX 낮으면 여행 심리 개선
+                if vix <= 15: score += 8
+                elif vix >= 25: score -= 8
+
+            # 화장품/뷰티: 중국 소비 + 환율 영향
+            elif sector == "화장품/뷰티":
+                # 달러 약세 = 원화 강세 = 중국 수출 호재
+                score += np.clip(-dxy_chg * 2, -8, 10)
+                # 한국 ETF(EWY) 상승 = 외국인 유입
+                score += np.clip(ewy_chg * 3, -8, 12)
+                if vix <= 15: score += 6
+
+            # 식품/음식료: 원자재(밀/곡물) 영향
+            elif sector == "식품/음식료":
+                # 유가 안정 = 물류비 안정
+                if 60 <= oil_val <= 85:
+                    score += 5
+                elif oil_val > 100:
+                    score -= 8
+                # 방어주 성격 - VIX 높아도 선방
+                if vix >= 25: score += 5
+                elif vix <= 12: score += 3
+
             # ★ 기타 섹터도 종목명으로 차별화
             else:
                 # 전자/IT 계열

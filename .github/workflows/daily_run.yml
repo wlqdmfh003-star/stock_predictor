@@ -81,6 +81,18 @@ jobs:
         df = DataFetcher(market='KOSPI+KOSDAQ', top_n=100).fetch_all_parallel()
         print(f'종목 수집: {len(df)}개')
 
+        # ★ df 빈 경우 재시도 (pykrx 실패 대응)
+        if len(df) < 10:
+            print('⚠️ 종목 수집 부족 - 재시도 중...')
+            import time
+            time.sleep(30)
+            df = DataFetcher(market='KOSPI+KOSDAQ', top_n=100).fetch_all_parallel()
+            print(f'재시도 결과: {len(df)}개')
+
+        if len(df) < 5:
+            print('❌ 종목 수집 실패 - 분석 중단')
+            raise Exception(f"종목 수집 실패: {len(df)}개")
+
         # 기술적 지표
         try:
             from utils.indicators import TechnicalIndicators

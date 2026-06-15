@@ -388,22 +388,25 @@ class DataFetcher:
         # pykrx 실패로 0이 된 종목 중 실제 미달 제거
         if "market_cap" in df.columns and self.min_market_cap > 0:
             before = len(df)
-            # 시가총액이 기준 이상이거나 데이터 없음(0)인 경우만 유지
-            # 단, 데이터 없는(0) 종목 중 거래대금도 0이면 제외
             if "volume_bil" in df.columns:
                 mask = (
                     (df["market_cap"] >= self.min_market_cap) |
                     ((df["market_cap"] == 0) & (df["volume_bil"] >= self.min_volume_bil))
                 )
-                df = df[mask].reset_index(drop=True)
+                df_filtered = df[mask].reset_index(drop=True)
             else:
-                df = df[
+                df_filtered = df[
                     (df["market_cap"] >= self.min_market_cap) |
                     (df["market_cap"] == 0)
                 ].reset_index(drop=True)
-            after = len(df)
+            after = len(df_filtered)
             if before != after:
                 print(f"  [최종필터] {before-after}개 시가총액 미달 종목 제거")
+            # ★ 필터 후 너무 적으면 원본 유지 (GitHub Actions pykrx 실패 대응)
+            if after >= 10:
+                df = df_filtered
+            else:
+                print(f"  ⚠️ 필터 후 {after}개로 너무 적음 → 원본 {before}개 유지")
 
         return df
 

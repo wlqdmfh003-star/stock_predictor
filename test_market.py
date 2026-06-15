@@ -1,413 +1,487 @@
-import sys as _sys
-if _sys.platform == "win32":
-    try:
-        _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-        _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-    except Exception:
-        pass
-
 import pandas as pd
 import numpy as np
-import requests
+import yfinance as yf
+from pykrx import stock as krx
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 import time
 import warnings
 warnings.filterwarnings('ignore')
 
-_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "ko-KR,ko;q=0.9",
-}
 
+class DataFetcher:
+    def __init__(self, market="KOSPI+KOSDAQ", top_n=200,
+                 min_market_cap=100_000_000_000, min_volume_bil=50):
+        self.market         = market
+        self.top_n          = top_n
+        self.min_market_cap = min_market_cap
+        self.min_volume_bil = min_volume_bil
+        self.today          = datetime.now().strftime("%Y%m%d")
+        # 일봉 1년 / 주봉 2년 / 월봉 5년
+        self.yf_start_daily   = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+        self.yf_start_weekly  = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
+        self.yf_start_monthly = (datetime.now() - timedelta(days=1825)).strftime("%Y-%m-%d")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 방법 1: 네이버 main.naver — PER/PBR/EPS/ROE (확인된 셀렉터)
-# ══════════════════════════════════════════════════════════════════════════════
-def _fetch_naver_main(code: str) -> dict:
-    result = _empty()
-    try:
-        from bs4 import BeautifulSoup
-        url  = f"https://finance.naver.com/item/main.naver?code={code}"
-        resp = requests.get(url, headers=_HEADERS, timeout=8)
-        resp.encoding = "euc-kr"
-        soup = BeautifulSoup(resp.text, "html.parser")
+    # ── 종목 리스트 ───────────────────────────────────────────────────────────
+    def _get_ticker_list(self):
+        markets = []
+        if "KOSPI"  in self.market: markets.append("KOSPI")
+        if "KOSDAQ" in self.market: markets.append("KOSDAQ")
 
-        # em#_per, em#_pbr, em#_eps (직접 확인된 셀렉터)
-        for field, em_id in [("per","_per"),("pbr","_pbr"),
-                              ("eps","_eps"),("bps","_bps")]:
-            tag = soup.find("em", id=em_id)
-            if tag:
-                result[field] = _safe_float(tag.get_text())
+        tickers = []
+        self._ticker_market_map = {}
+        self._ticker_name_map   = {}
 
-        # ROE — th(ROE(%)) 옆 td (직접 확인된 방식)
-        for th in soup.find_all("th"):
-            th_txt = th.get_text(strip=True)
-            if "ROE" in th_txt:
-                td = th.find_next_sibling("td")
-                if td:
-                    val = _safe_float(td.get_text(strip=True))
-                    if val != 0:
-                        if "%" in th_txt:
-                            result["roe"] = val
-                            break
-                        elif result["roe"] == 0:
-                            result["roe"] = val
-
-        # ROE 보완: EPS/BPS 계산
-        if result["roe"] == 0 and result["bps"] > 0 and result["eps"] != 0:
-            result["roe"] = round(result["eps"] / result["bps"] * 100, 2)
-
-        return result
-    except Exception:
-        return result
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 방법 2: wisereport JSON API — ROA/영업이익률/부채비율/매출증가율
-# ★ JavaScript 동적 데이터를 JSON API로 직접 수집
-# ══════════════════════════════════════════════════════════════════════════════
-def _fetch_wisereport(code: str) -> dict:
-    """
-    wisereport.co.kr JSON API로 ROA/영업이익률/부채비율/매출증가율 수집
-    네이버 재무분석 iframe 데이터 소스
-    """
-    result = _empty()
-    try:
-        # wisereport 재무비율 API
-        urls = [
-            f"https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd={code}",
-            f"https://comp.wisereport.co.kr/company/ajax/cF3002.aspx?cmp_cd={code}&fin_typ=0&freq_typ=Y",
-            f"https://navercomp.wisereport.co.kr/v2/company/ajax/cF3002.aspx?cmp_cd={code}&fin_typ=0&freq_typ=Y",
-        ]
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Referer": f"https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd={code}",
-            "X-Requested-With": "XMLHttpRequest",
-        }
-
-        for url in urls:
+        for mkt in markets:
             try:
-                resp = requests.get(url, headers=headers, timeout=8)
-                if resp.status_code != 200:
+                t = krx.get_market_ticker_list(self.today, market=mkt)
+                if t and len(t) > 0:
+                    for code in t:
+                        if code not in self._ticker_market_map:
+                            self._ticker_market_map[code] = mkt
+                    tickers.extend(t)
+                    print(f"[OK] pykrx {mkt} 종목리스트: {len(t)}개")
+                    try:
+                        for code in t:
+                            if code not in self._ticker_name_map:
+                                n = krx.get_market_ticker_name(code)
+                                if n and str(n).strip():
+                                    self._ticker_name_map[code] = str(n).strip()
+                    except Exception:
+                        pass
                     continue
+            except Exception:
+                pass
 
-                # JSON 응답 시도
+            # 네이버 폴백
+            try:
+                import requests
+                from bs4 import BeautifulSoup
+                mkt_code = "0" if mkt == "KOSPI" else "1"
+                t_naver  = []
+                for page in range(1, 40):
+                    url  = (f"https://finance.naver.com/sise/sise_market_sum.naver"
+                            f"?sosok={mkt_code}&page={page}")
+                    resp = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=5)
+                    from bs4 import BeautifulSoup
+                    soup  = BeautifulSoup(resp.text, "html.parser")
+                    rows  = soup.select("table.type_2 tbody tr")
+                    found = 0
+                    for row in rows:
+                        a = row.select_one("td a[href*='code=']")
+                        if a:
+                            code = a["href"].split("code=")[-1].strip()
+                            name = a.get_text(strip=True)
+                            if len(code)==6 and code.isdigit():
+                                t_naver.append(code)
+                                if code not in self._ticker_market_map:
+                                    self._ticker_market_map[code] = mkt
+                                if name and code not in self._ticker_name_map:
+                                    self._ticker_name_map[code] = name
+                                found += 1
+                    if found == 0: break
+                    time.sleep(0.05)
+                tickers.extend(t_naver)
+                print(f"[OK] 네이버 {mkt} 종목리스트: {len(t_naver)}개")
+            except Exception as e:
+                print(f"⚠️ {mkt} 종목리스트 수집 실패: {e}")
+
+        return list(set(tickers))
+
+    # ── 사전 스코어링 ─────────────────────────────────────────────────────────
+    def _get_filtered_tickers(self):
+        tickers = self._get_ticker_list()
+        if not tickers:
+            return self._default_tickers()
+        ticker_set = set(tickers)
+
+        try:
+            markets = []
+            if "KOSPI"  in self.market: markets.append("KOSPI")
+            if "KOSDAQ" in self.market: markets.append("KOSDAQ")
+
+            cap_frames, vol_frames = [], []
+            for mkt in markets:
                 try:
-                    data = resp.json()
-                    if isinstance(data, dict):
-                        # 다양한 키 이름 시도
-                        result["roa"]        = _safe_float(data.get("ROA") or data.get("roa"))
-                        result["op_margin"]  = _safe_float(data.get("영업이익률") or
-                                                           data.get("OPM") or
-                                                           data.get("op_margin"))
-                        result["debt_ratio"] = _safe_float(data.get("부채비율") or
-                                                           data.get("DEBT") or
-                                                           data.get("debt_ratio"))
-                        result["rev_growth"] = _safe_float(data.get("매출증가율") or
-                                                           data.get("REV_GROWTH"))
-                        if any(result[k] != 0 for k in ["roa","op_margin","debt_ratio"]):
-                            return result
+                    c = krx.get_market_cap_by_ticker(self.today, market=mkt)
+                    cap_frames.append(c)
+                except Exception:
+                    pass
+                try:
+                    v = krx.get_market_trading_value_by_ticker(self.today, market=mkt)
+                    vol_frames.append(v)
                 except Exception:
                     pass
 
-                # HTML 응답 시도 (테이블 파싱)
-                from bs4 import BeautifulSoup
-                resp.encoding = "utf-8"
-                soup = BeautifulSoup(resp.text, "html.parser")
+            if not cap_frames:
+                return tickers[:self.top_n]
 
-                # 숫자 데이터가 있는 td 파싱
-                for tr in soup.find_all("tr"):
-                    tds = tr.find_all("td")
-                    ths = tr.find_all("th")
-                    if not ths or len(tds) < 2:
-                        continue
-                    label = ths[0].get_text(strip=True)
-                    # 첫 번째 숫자 td (가장 최신)
-                    for td in tds:
-                        val_txt = td.get_text(strip=True).replace(",","").replace("%","")
-                        try:
-                            val = float(val_txt)
-                            if val == 0:
-                                continue
-                            if   "ROA"    in label and result["roa"]        == 0:
-                                result["roa"]        = val; break
-                            elif "영업이익률" in label and result["op_margin"] == 0:
-                                result["op_margin"]  = val; break
-                            elif "부채"   in label and result["debt_ratio"] == 0:
-                                result["debt_ratio"] = val; break
-                            elif "매출" in label and "증가" in label and result["rev_growth"] == 0:
-                                result["rev_growth"] = val; break
-                        except Exception:
-                            continue
+            cap_df = pd.concat(cap_frames)
+            cap_df = cap_df[~cap_df.index.duplicated(keep='first')]
+            cap_df = cap_df[cap_df["시가총액"] >= self.min_market_cap]
 
-                if any(result[k] != 0 for k in ["roa","op_margin","debt_ratio"]):
-                    return result
-            except Exception:
-                continue
+            if vol_frames:
+                vol_df = pd.concat(vol_frames)
+                vol_df = vol_df[~vol_df.index.duplicated(keep='first')]
+                if "거래대금" in vol_df.columns:
+                    vol_df = vol_df[vol_df["거래대금"] >= self.min_volume_bil*1e8]
+                    valid  = set(cap_df.index) & set(vol_df.index)
+                else:
+                    valid = set(cap_df.index)
+            else:
+                valid = set(cap_df.index)
 
-        return result
-    except Exception:
-        return result
+            filtered = cap_df[cap_df.index.isin(valid) & cap_df.index.isin(ticker_set)].copy()
 
+            # ★ ETF/인덱스 종목 제외 (섹터/테마 분석 불가)
+            etf_keywords = [
+                'KODEX','TIGER','KBSTAR','ARIRANG','HANARO',
+                'KOSEF','FOCUS','SOL','ACE','PLUS','RISE',
+                'TIMEFOLIO','SMART','TREX','WON','BNK',
+            ]
+            etf_names = getattr(self, '_ticker_name_map', {})
+            etf_codes  = set()
+            for code, name in etf_names.items():
+                if any(kw in str(name) for kw in etf_keywords):
+                    etf_codes.add(code)
+            if etf_codes:
+                filtered = filtered[~filtered.index.isin(etf_codes)]
+                print(f"  [ETF 제외] {len(etf_codes)}개 ETF/인덱스 종목 제외")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 방법 3: 네이버 재무분석 페이지 크롤링
-# ══════════════════════════════════════════════════════════════════════════════
-def _fetch_naver_finsum(code: str) -> dict:
-    result = _empty()
-    try:
-        from bs4 import BeautifulSoup
-        url  = f"https://finance.naver.com/item/coinfo.naver?code={code}&target=finsum_more"
-        resp = requests.get(url, headers=_HEADERS, timeout=8)
-        resp.encoding = "euc-kr"
-        soup = BeautifulSoup(resp.text, "html.parser")
+            if vol_frames:
+                vm = pd.concat(vol_frames)
+                vm = vm[~vm.index.duplicated(keep='first')]
+                if "거래대금" in vm.columns:
+                    filtered["거래대금"] = filtered.index.map(
+                        lambda c: float(vm.loc[c,"거래대금"]) if c in vm.index else 0.0)
+                else:
+                    filtered["거래대금"] = 0.0
+            else:
+                filtered["거래대금"] = 0.0
 
-        for tbl in soup.select("table"):
-            for tr in tbl.select("tr"):
-                ths = tr.select("th")
-                tds = tr.select("td")
-                if not ths or not tds:
-                    continue
-                label = ths[0].get_text(strip=True)
-                for td in tds:
-                    val_txt = td.get_text(strip=True).replace(",","").replace("%","").strip()
+            kospi_codes  = {c for c,m in self._ticker_market_map.items() if m=="KOSPI"}
+            kosdaq_codes = {c for c,m in self._ticker_market_map.items() if m=="KOSDAQ"}
+
+            pool_size   = 200
+            kospi_pool  = filtered[filtered.index.isin(kospi_codes)]\
+                          .sort_values("거래대금",ascending=False).index.tolist()[:pool_size]
+            kosdaq_pool = filtered[filtered.index.isin(kosdaq_codes)]\
+                          .sort_values("거래대금",ascending=False).index.tolist()[:pool_size]
+            pool        = kospi_pool + kosdaq_pool
+
+            print(f"[분석] 사전 스코어링 중... (KOSPI {len(kospi_pool)}개 / KOSDAQ {len(kosdaq_pool)}개)")
+
+            if not kospi_pool and not kosdaq_pool:
+                return filtered.sort_values("거래대금",ascending=False).index.tolist()[:self.top_n]
+
+            pre_scores = self._score_candidates_pykrx(pool)
+
+            half = self.top_n // 2
+            kospi_top  = sorted([c for c in kospi_pool  if c in pre_scores],
+                                key=lambda c: pre_scores[c], reverse=True)[:half]
+            kosdaq_top = sorted([c for c in kosdaq_pool if c in pre_scores],
+                                key=lambda c: pre_scores[c], reverse=True)[:half]
+
+            result, used = [], set()
+            for k, q in zip(kospi_top, kosdaq_top):
+                result.append(k); used.add(k)
+                result.append(q); used.add(q)
+            extra = sorted([c for c in pool if c not in used and c in pre_scores],
+                           key=lambda c: pre_scores[c], reverse=True)
+            result += extra
+            return result[:self.top_n]
+
+        except Exception as e:
+            print(f"필터 오류: {e}")
+            # ★ 오류 시에도 시가총액/거래대금 필터 적용
+            try:
+                import yfinance as yf
+                valid_codes = []
+                for code in tickers:
                     try:
-                        val = float(val_txt)
-                        if val == 0:
-                            continue
-                        if   "ROA"    in label and result["roa"]        == 0:
-                            result["roa"]        = val; break
-                        elif "부채"   in label and result["debt_ratio"] == 0:
-                            result["debt_ratio"] = val; break
-                        elif "영업이익률" in label and result["op_margin"] == 0:
-                            result["op_margin"]  = val; break
-                        elif "매출" in label and "증가" in label and result["rev_growth"] == 0:
-                            result["rev_growth"] = val; break
-                        elif "ROE"    in label and result["roe"]         == 0:
-                            result["roe"]        = val; break
-                        elif "PER"    in label and result["per"]         == 0:
-                            result["per"]        = val; break
+                        for suffix in [".KS", ".KQ"]:
+                            info = yf.Ticker(f"{code}{suffix}").info
+                            mc  = float(info.get("marketCap") or 0)
+                            vol = float(info.get("averageDailyVolume10Day") or 0)
+                            if mc >= self.min_market_cap:
+                                valid_codes.append(code)
+                                break
                     except Exception:
                         continue
-        return result
-    except Exception:
-        return result
+                    if len(valid_codes) >= self.top_n:
+                        break
+                return valid_codes[:self.top_n] if valid_codes else tickers[:self.top_n]
+            except Exception:
+                return tickers[:self.top_n]
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 방법 4: yfinance 최후 폴백
-# ══════════════════════════════════════════════════════════════════════════════
-def _fetch_yfinance(code: str) -> dict:
-    result = _empty()
-    try:
-        import yfinance as yf
-        for suffix in [".KS", ".KQ"]:
+    def _score_candidates_pykrx(self, codes):
+        scores    = {}
+        start_30d = (datetime.now()-timedelta(days=50)).strftime("%Y%m%d")
+        for code in codes:
             try:
-                info = yf.Ticker(f"{code}{suffix}").info
-                if not info:
-                    continue
-                result["per"]        = _safe_float(info.get("trailingPE"))
-                result["pbr"]        = _safe_float(info.get("priceToBook"))
-                result["roe"]        = _safe_float(info.get("returnOnEquity"),  mul=100)
-                result["roa"]        = _safe_float(info.get("returnOnAssets"),  mul=100)
-                result["op_margin"]  = _safe_float(info.get("operatingMargins"), mul=100)
-                result["rev_growth"] = _safe_float(info.get("revenueGrowth"),   mul=100)
-                result["eps"]        = _safe_float(info.get("trailingEps"))
-                # ★ 시가총액 수집
-                mc = info.get("marketCap")
-                if mc and float(mc) > 0:
-                    result["market_cap"] = float(mc)
-                if result["per"] > 0 or result["pbr"] > 0:
-                    return result
+                ohlcv  = krx.get_market_ohlcv_by_date(start_30d, self.today, code)
+                if ohlcv is None or len(ohlcv) < 10:
+                    scores[code] = 0.0; continue
+                close  = ohlcv["종가"].astype(float).values
+                volume = ohlcv["거래량"].astype(float).values
+                score  = 0.0
+                if len(close)>=6:  score += np.clip((close[-1]/close[-6]-1)*100*2,-20,20)
+                if len(close)>=21: score += np.clip((close[-1]/close[-21]-1)*100*1.5,-20,20)
+                if len(volume)>=11:
+                    r = volume[-1]/(volume[-11:-1].mean()+1e-9)
+                    score += 25 if r>=3 else 15 if r>=2 else 8 if r>=1.5 else 0
+                if len(close)>=15:
+                    d = np.diff(close[-15:])
+                    g = np.where(d>0,d,0).mean(); l = np.where(d<0,-d,0).mean()
+                    rsi = 100-100/(1+g/(l+1e-9))
+                    score += 20 if 30<=rsi<=45 else 10 if 45<rsi<=55 else 5 if rsi<30 else -15 if rsi>75 else 0
+                if len(ohlcv)>=2:
+                    ph=float(ohlcv["고가"].iloc[-2]); pl=float(ohlcv["저가"].iloc[-2])
+                    po=float(ohlcv["시가"].iloc[-1])
+                    if close[-1]>=po+(ph-pl)*0.5: score+=20
+                if len(close)>=20 and close.max()>0 and close[-1]/close.max()>=0.90: score+=10
+                if len(close)>=21:
+                    ma5=close[-5:].mean(); ma20=close[-20:].mean()
+                    score += 10 if ma5>ma20 else -5
+                scores[code] = float(score)
+            except Exception:
+                scores[code] = 0.0
+            time.sleep(0.03)
+        return scores
+
+    # ── 일봉+주봉+월봉 수집 (트리플 타임프레임) ─────────────────────────────
+    def _fetch_single(self, code):
+        market_map = getattr(self, '_ticker_market_map', {})
+        mkt        = market_map.get(code, "")
+        suffixes   = [".KS",".KQ"] if mkt!="KOSDAQ" else [".KQ",".KS"]
+
+        for suffix in suffixes:
+            try:
+                ticker = yf.Ticker(f"{code}{suffix}")
+
+                # ① 일봉 (1년)
+                raw_d = ticker.history(start=self.yf_start_daily, auto_adjust=True)
+                if raw_d is None or len(raw_d) < 60: continue
+                raw_d.columns = [str(c).lower() for c in raw_d.columns]
+                if "close" not in raw_d.columns: continue
+
+                daily = pd.DataFrame(index=raw_d.index)
+                daily["close"]  = raw_d["close"].astype(float)
+                daily["open"]   = raw_d.get("open",   raw_d["close"]).astype(float)
+                daily["high"]   = raw_d.get("high",   raw_d["close"]).astype(float)
+                daily["low"]    = raw_d.get("low",    raw_d["close"]).astype(float)
+                daily["volume"] = raw_d.get("volume", pd.Series(0.0,index=raw_d.index)).astype(float)
+                daily = daily.dropna(subset=["close"])
+                if len(daily) < 60: continue
+
+                # ② 주봉 (2년)
+                weekly = None
+                try:
+                    raw_w = ticker.history(start=self.yf_start_weekly, interval="1wk", auto_adjust=True)
+                    if raw_w is not None and len(raw_w) >= 10:
+                        raw_w.columns = [str(c).lower() for c in raw_w.columns]
+                        if "close" in raw_w.columns:
+                            weekly = pd.DataFrame(index=raw_w.index)
+                            weekly["close"]  = raw_w["close"].astype(float)
+                            weekly["open"]   = raw_w.get("open",  raw_w["close"]).astype(float)
+                            weekly["high"]   = raw_w.get("high",  raw_w["close"]).astype(float)
+                            weekly["low"]    = raw_w.get("low",   raw_w["close"]).astype(float)
+                            weekly["volume"] = raw_w.get("volume",pd.Series(0.0,index=raw_w.index)).astype(float)
+                            weekly = weekly.dropna(subset=["close"])
+                except Exception:
+                    weekly = None
+
+                # ③ 월봉 (5년) ← 신규
+                monthly = None
+                try:
+                    raw_m = ticker.history(start=self.yf_start_monthly, interval="1mo", auto_adjust=True)
+                    if raw_m is not None and len(raw_m) >= 6:
+                        raw_m.columns = [str(c).lower() for c in raw_m.columns]
+                        if "close" in raw_m.columns:
+                            monthly = pd.DataFrame(index=raw_m.index)
+                            monthly["close"]  = raw_m["close"].astype(float)
+                            monthly["open"]   = raw_m.get("open",  raw_m["close"]).astype(float)
+                            monthly["high"]   = raw_m.get("high",  raw_m["close"]).astype(float)
+                            monthly["low"]    = raw_m.get("low",   raw_m["close"]).astype(float)
+                            monthly["volume"] = raw_m.get("volume",pd.Series(0.0,index=raw_m.index)).astype(float)
+                            monthly = monthly.dropna(subset=["close"])
+                except Exception:
+                    monthly = None
+
+                return {"code":code, "ohlcv":daily, "ohlcv_weekly":weekly, "ohlcv_monthly":monthly}
+
             except Exception:
                 continue
-    except Exception:
-        pass
-    return result
+        return None
 
-
-# ── 유틸 ─────────────────────────────────────────────────────────────────────
-def _empty() -> dict:
-    return {
-        "per": 0.0, "pbr": 0.0, "roe": 0.0, "roa": 0.0,
-        "market_cap": 0.0,
-        "debt_ratio": 0.0, "op_margin": 0.0, "rev_growth": 0.0,
-        "eps": 0.0, "bps": 0.0,
-    }
-
-def _safe_float(val, mul: float = 1.0) -> float:
-    try:
-        if val is None:
-            return 0.0
-        s = str(val).replace(",","").replace("%","").replace("배","")\
-                    .replace("원","").strip()
-        if s in ("", "N/A", "-", "null", "nan", "None"):
-            return 0.0
-        f = float(s)
-        if not np.isfinite(f):
-            return 0.0
-        return round(f * mul, 2)
-    except Exception:
-        return 0.0
-
-def _merge(base: dict, extra: dict) -> dict:
-    for k in base:
-        if base.get(k, 0.0) == 0.0 and extra.get(k, 0.0) != 0.0:
-            base[k] = extra[k]
-    return base
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 메인 클래스
-# ══════════════════════════════════════════════════════════════════════════════
-class FundamentalAnalyzer:
-    """
-    재무 분석 v6.1
-    ★ 1순위: 네이버 main.naver (PER/PBR/ROE/EPS — 직접 확인된 셀렉터)
-    ★ 2순위: wisereport JSON API (ROA/영업이익률/부채비율/매출증가율)
-    ★ 3순위: 네이버 재무분석 페이지 크롤링 보완
-    ★ 4순위: yfinance 최후 폴백
-    ★ pykrx 완전 제거
-    """
-
-    def fetch_and_score(self, df: pd.DataFrame) -> pd.DataFrame:
-        df    = df.copy()
-        codes = df["code"].tolist()
-
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        def fetch_one(code):
-            # 1순위: 네이버 main (PER/PBR/ROE)
-            data = _fetch_naver_main(code)
-
-            # 2순위: wisereport (ROA/영업이익률/부채비율)
-            if data["roa"] == 0 or data["op_margin"] == 0 or data["debt_ratio"] == 0:
-                wise = _fetch_wisereport(code)
-                data = _merge(data, wise)
-
-            # 3순위: 네이버 재무분석 페이지 보완
-            if data["roa"] == 0 or data["op_margin"] == 0:
-                fin = _fetch_naver_finsum(code)
-                data = _merge(data, fin)
-
-            # 4순위: yfinance 최후 폴백
-            if data["per"] == 0 and data["pbr"] == 0 and data["roe"] == 0:
-                yf_d = _fetch_yfinance(code)
-                data = _merge(data, yf_d)
-
-            # ROE 최종 계산
-            if data["roe"] == 0 and data["bps"] > 0 and data["eps"] != 0:
-                data["roe"] = round(data["eps"] / data["bps"] * 100, 2)
-
-            time.sleep(0.1)
-            return code, data
-
-        print(f"[재무] 데이터 수집 중... ({len(codes)}개)")
-        fund_data = {}
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {executor.submit(fetch_one, c): c for c in codes}
+    # ── 병렬 수집 ────────────────────────────────────────────────────────────
+    def fetch_all_parallel(self):
+        tickers = self._get_filtered_tickers()
+        records = []
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            future_to_code = {executor.submit(self._fetch_single,code):code for code in tickers}
             done = 0
-            for future in as_completed(futures):
-                code, data = future.result()
-                fund_data[code] = data
+            for future in as_completed(future_to_code):
+                code   = future_to_code[future]
+                result = future.result()
+                if result and result["code"]==code:
+                    records.append(result)
                 done += 1
-                if done % 20 == 0:
-                    print(f"  재무 진행: {done}/{len(codes)}")
+                if done%30==0: print(f"   가격 다운로드: {done}/{len(tickers)}")
 
-        col_keys = ["per","pbr","roe","roa","debt_ratio","op_margin","rev_growth","eps","bps"]
-        cols = {k: [] for k in col_keys + ["fundamental_score"]}
+        if not records:
+            return self._generate_demo_data()
 
-        for _, row in df.iterrows():
-            code = str(row.get("code", ""))
-            d    = fund_data.get(code, _empty())
+        rows = []
+        for rec in records:
+            code    = rec["code"]
+            ohlcv   = rec["ohlcv"]
+            weekly  = rec.get("ohlcv_weekly")
+            monthly = rec.get("ohlcv_monthly")
+            try:
+                last = ohlcv.iloc[-1]; prev = ohlcv.iloc[-2] if len(ohlcv)>1 else ohlcv.iloc[-1]
+                name_map = getattr(self,'_ticker_name_map',{})
+                if code in name_map and name_map[code]:
+                    name = name_map[code]
+                else:
+                    try:
+                        n = krx.get_market_ticker_name(code)
+                        name = str(n).strip() if n and str(n).strip() else code
+                    except: name = code
 
-            per  = _safe_float(d.get("per"))
-            pbr  = _safe_float(d.get("pbr"))
-            roe  = _safe_float(d.get("roe"))
-            roa  = _safe_float(d.get("roa"))
-            debt = _safe_float(d.get("debt_ratio"))
-            opm  = _safe_float(d.get("op_margin"))
-            revg = _safe_float(d.get("rev_growth"))
-            eps  = _safe_float(d.get("eps"))
-            bps  = _safe_float(d.get("bps"))
+                try:
+                    mc  = krx.get_market_cap_by_date(self.today,self.today,code)
+                    cap = float(mc["시가총액"].iloc[-1]) if len(mc)>0 else 0.0
+                except: cap = 0.0
 
-            cols["per"].append(per);         cols["pbr"].append(pbr)
-            cols["roe"].append(roe);         cols["roa"].append(roa)
-            cols["debt_ratio"].append(debt); cols["op_margin"].append(opm)
-            cols["rev_growth"].append(revg); cols["eps"].append(eps)
-            cols["bps"].append(bps)
-            cols["fundamental_score"].append(
-                self._calc_score(per, pbr, roe, roa, debt, opm, revg)
-            )
+                market_map   = getattr(self,'_ticker_market_map',{})
+                stock_market = market_map.get(code,"KOSPI")
+                close = float(last["close"]); vol = float(last["volume"])
+                prev_close = float(prev["close"])
+                if close<=0: continue
 
-            # ★ 시가총액 yfinance 보완 (pykrx 실패 시)
-            if "market_cap" in d and d["market_cap"] > 0:
-                cur_cap = float(row.get("market_cap", 0) or 0)
-                if cur_cap <= 0:
-                    df.at[row.name, "market_cap"] = d["market_cap"]
+                rows.append({
+                    "code":code,"name":name,"market":stock_market,
+                    "current_price":close,
+                    "open":float(last["open"]),"high":float(last["high"]),"low":float(last["low"]),
+                    "volume":vol,"volume_bil":vol*close/1e8,"market_cap":cap,
+                    "ohlcv":ohlcv,"ohlcv_weekly":weekly,"ohlcv_monthly":monthly,
+                    "prev_close":prev_close,"prev_high":float(prev["high"]),"prev_low":float(prev["low"]),
+                    "change_pct":(close/prev_close-1)*100 if prev_close>0 else 0.0,
+                })
+            except Exception: continue
 
-        for col, vals in cols.items():
-            df[col] = vals
+        if not rows: return self._generate_demo_data()
 
-        n     = len(codes)
-        per_n = sum(1 for v in cols["per"]       if v > 0)
-        roe_n = sum(1 for v in cols["roe"]       if v != 0)
-        roa_n = sum(1 for v in cols["roa"]       if v != 0)
-        opm_n = sum(1 for v in cols["op_margin"] if v != 0)
-        print(f"  [재무완료] PER={per_n}/{n} ROE={roe_n}/{n} "
-              f"ROA={roa_n}/{n} 영업이익률={opm_n}/{n}")
+        df = pd.DataFrame(rows)
+        df = df[df["current_price"]>0].reset_index(drop=True)
+
+        if "name" in df.columns:
+            def _fix_name(row):
+                n = row["name"]
+                if isinstance(n,(pd.DataFrame,list)): return str(row.get("code","-"))
+                if not isinstance(n,str) or n.strip() in ("","nan"): return str(row.get("code","-"))
+                return n
+            df["name"] = df.apply(_fix_name, axis=1)
+
+        # ★ 시가총액/거래대금 최종 재확인 필터
+        # pykrx 실패로 0이 된 종목 중 실제 미달 제거
+        if "market_cap" in df.columns and self.min_market_cap > 0:
+            before = len(df)
+            # 시가총액이 기준 이상이거나 데이터 없음(0)인 경우만 유지
+            # 단, 데이터 없는(0) 종목 중 거래대금도 0이면 제외
+            if "volume_bil" in df.columns:
+                mask = (
+                    (df["market_cap"] >= self.min_market_cap) |
+                    ((df["market_cap"] == 0) & (df["volume_bil"] >= self.min_volume_bil))
+                )
+                df = df[mask].reset_index(drop=True)
+            else:
+                df = df[
+                    (df["market_cap"] >= self.min_market_cap) |
+                    (df["market_cap"] == 0)
+                ].reset_index(drop=True)
+            after = len(df)
+            if before != after:
+                print(f"  [최종필터] {before-after}개 시가총액 미달 종목 제거")
+
         return df
 
-    def _calc_score(self, per, pbr, roe, roa, debt, opm, revg) -> float:
-        score = 50.0
+    # ── 기관수급 ─────────────────────────────────────────────────────────────
+    def fetch_institution_data(self, df):
+        inst_data = {}
+        start_5d  = (datetime.now()-timedelta(days=10)).strftime("%Y%m%d")
+        print("[기관/외인] 수급 수집 중...")
+        total = len(df)
+        for i, code in enumerate(df["code"].tolist()):
+            try:
+                inv = krx.get_market_trading_value_by_date(start_5d,self.today,code)
+                if inv is not None and len(inv)>0:
+                    inst_net    = inv["기관합계"].sum()   if "기관합계"   in inv.columns else 0
+                    foreign_net = inv["외국인합계"].sum() if "외국인합계" in inv.columns else 0
+                else: inst_net, foreign_net = 0, 0
+                inst_data[code] = {"inst_net":inst_net,"foreign_net":foreign_net}
+            except Exception:
+                inst_data[code] = {"inst_net":0,"foreign_net":0}
+            if (i+1)%20==0: print(f"   기관수급 진행: {i+1}/{total}")
+            time.sleep(0.05)
+        df = df.copy()
+        df["inst_net"]    = df["code"].map(lambda c:inst_data.get(c,{}).get("inst_net",0))
+        df["foreign_net"] = df["code"].map(lambda c:inst_data.get(c,{}).get("foreign_net",0))
+        return df
 
-        if   0 < per <= 8:   score += 22
-        elif 0 < per <= 12:  score += 17
-        elif 0 < per <= 15:  score += 12
-        elif 0 < per <= 20:  score += 6
-        elif per > 60:       score -= 15
-        elif per > 40:       score -= 10
-        elif per > 30:       score -= 5
+    def _default_tickers(self):
+        return ["005930","000660","035720","005380","051910",
+                "006400","035420","207940","068270","028260"]
 
-        if   0 < pbr <= 0.5: score += 20
-        elif 0 < pbr <= 1.0: score += 14
-        elif 0 < pbr <= 1.5: score += 6
-        elif pbr > 5.0:      score -= 15
-        elif pbr > 4.0:      score -= 10
-        elif pbr > 3.0:      score -= 5
-
-        if   roe >= 25:      score += 18
-        elif roe >= 20:      score += 14
-        elif roe >= 15:      score += 9
-        elif roe >= 10:      score += 4
-        elif roe < -10:      score -= 20
-        elif roe < 0:        score -= 12
-        elif roe < 5:        score -= 4
-
-        if   roa >= 15:      score += 8
-        elif roa >= 10:      score += 5
-        elif roa >= 5:       score += 2
-        elif roa < -5:       score -= 10
-        elif roa < 0:        score -= 6
-
-        if   0 < debt <= 30: score += 8
-        elif 0 < debt <= 60: score += 4
-        elif debt > 300:     score -= 15
-        elif debt > 200:     score -= 10
-        elif debt > 150:     score -= 5
-
-        if   opm >= 20:      score += 8
-        elif opm >= 15:      score += 5
-        elif opm >= 10:      score += 2
-        elif opm < -10:      score -= 12
-        elif opm < 0:        score -= 7
-
-        if   revg >= 30:     score += 8
-        elif revg >= 20:     score += 5
-        elif revg >= 10:     score += 2
-        elif revg < -20:     score -= 10
-        elif revg < -10:     score -= 6
-
-        return float(np.clip(score, 0, 100))
+    def _generate_demo_data(self):
+        np.random.seed(42)
+        names = ["삼성전자","SK하이닉스","카카오","현대차","LG에너지솔루션",
+                 "삼성SDI","NAVER","삼성바이오로직스","셀트리온","POSCO홀딩스",
+                 "에코프로","HLB","알테오젠","포스코퓨처엠","엘앤에프",
+                 "레인보우로보틱스","리가켐바이오","클래시스","파마리서치","휴젤"]
+        codes = ["005930","000660","035720","005380","051910",
+                 "006400","035420","207940","068270","005490",
+                 "247540","028300","196170","003670","066970",
+                 "277810","343510","214150","214450","145020"]
+        rows = []
+        for i,code in enumerate(codes[:len(names)]):
+            price  = np.random.randint(10000,500000)
+            dates  = pd.date_range(end=datetime.now(),periods=250,freq="B")
+            prices = price * np.cumprod(1+np.random.randn(250)*0.015)
+            ohlcv  = pd.DataFrame({"close":prices,
+                "open":prices*(1+np.random.randn(250)*0.005),
+                "high":prices*(1+np.abs(np.random.randn(250))*0.01),
+                "low": prices*(1-np.abs(np.random.randn(250))*0.01),
+                "volume":np.random.randint(100000,2000000,250).astype(float)},index=dates)
+            wdates  = pd.date_range(end=datetime.now(),periods=104,freq="W")
+            wprices = price * np.cumprod(1+np.random.randn(104)*0.03)
+            weekly  = pd.DataFrame({"close":wprices,
+                "open":wprices*(1+np.random.randn(104)*0.01),
+                "high":wprices*(1+np.abs(np.random.randn(104))*0.02),
+                "low": wprices*(1-np.abs(np.random.randn(104))*0.02),
+                "volume":np.random.randint(500000,10000000,104).astype(float)},index=wdates)
+            mdates  = pd.date_range(end=datetime.now(),periods=60,freq="ME")
+            mprices = price * np.cumprod(1+np.random.randn(60)*0.05)
+            monthly = pd.DataFrame({"close":mprices,
+                "open":mprices*(1+np.random.randn(60)*0.02),
+                "high":mprices*(1+np.abs(np.random.randn(60))*0.04),
+                "low": mprices*(1-np.abs(np.random.randn(60))*0.04),
+                "volume":np.random.randint(2000000,50000000,60).astype(float)},index=mdates)
+            vol = float(np.random.randint(100000,2000000))
+            mkt = "KOSPI" if i<10 else "KOSDAQ"
+            rows.append({
+                "code":code,"name":names[i],"market":mkt,
+                "current_price":float(prices[-1]),
+                "open":float(prices[-1]*0.998),"high":float(prices[-1]*1.015),
+                "low":float(prices[-1]*0.985),"volume":vol,
+                "volume_bil":float(prices[-1])*vol/1e8,
+                "market_cap":float(price*1e7*np.random.uniform(10,500)),
+                "ohlcv":ohlcv,"ohlcv_weekly":weekly,"ohlcv_monthly":monthly,
+                "prev_close":float(prices[-2]),"prev_high":float(prices[-2]*1.01),
+                "prev_low":float(prices[-2]*0.99),
+                "change_pct":float((prices[-1]/prices[-2]-1)*100),
+                "inst_net":int(np.random.randint(-500000,500000)),
+                "foreign_net":int(np.random.randint(-1000000,1000000)),
+            })
+        return pd.DataFrame(rows)

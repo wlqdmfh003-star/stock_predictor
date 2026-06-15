@@ -240,21 +240,34 @@ class KISApi:
         frgn_amt    = sum(int(i.get("frgn_ntby_tr_pbmn",0) or 0) for i in output)
 
         # ★ 외국인 일별 순매수 추이 분석
+        # KIS API는 최신→과거 순서로 반환 (output[0]=오늘)
         frgn_daily = [int(i.get("frgn_ntby_qty",0) or 0) for i in output]
 
-        # 연속 순매수/순매도 일수
+        # 날짜 정렬 보완: stck_bsop_date 기준 내림차순 정렬
+        try:
+            dated = [(i.get("stck_bsop_date",""), int(i.get("frgn_ntby_qty",0) or 0))
+                     for i in output if i.get("stck_bsop_date","")]
+            if dated:
+                dated.sort(key=lambda x: x[0], reverse=True)  # 최신→과거
+                frgn_daily = [v for _, v in dated]
+        except Exception:
+            pass  # 정렬 실패 시 원래 순서 유지
+
+        # ★ 연속 순매수/순매도 (최신→과거 순서로 계산)
+        # output[0]=오늘부터 시작 → 오늘 기준 정확한 연속일수
         consec = 0
-        for v in reversed(frgn_daily):
+        for v in frgn_daily:  # ★ reversed 제거 (이미 최신→과거 순서)
             if v > 0: consec += 1
             elif v < 0:
                 if consec == 0: consec = -1
                 else: break
             else: break
 
-        # 5일 추세 (선형회귀 기울기)
+        # 5일 추세 (선형회귀 기울기) - 최신→과거이므로 flip
         if len(frgn_daily) >= 5:
-            x = np.arange(len(frgn_daily[-5:]))
-            trend = float(np.polyfit(x, frgn_daily[-5:], 1)[0])
+            recent5 = frgn_daily[:5][::-1]  # 과거→최신으로 변환
+            x = np.arange(len(recent5))
+            trend = float(np.polyfit(x, recent5, 1)[0])
         else:
             trend = 0.0
 
@@ -269,15 +282,25 @@ class KISApi:
         if trend > 0:     ft_score += 8
         elif trend < 0:   ft_score -= 8
 
-        inst_score = float(np.clip(50+(inst_amt+frgn_amt*0.5)/1e7, 0, 100))
+        # ★ 기관 점수 계산 개선
+        # inst_amt/frgn_amt가 0이면 순매수 건수로 보완
+        if inst_amt == 0 and frgn_amt == 0:
+            # 건수 기반 점수 (금액 없을 때)
+            buy_cnt  = sum(1 for i in output if int(i.get("orgn_ntby_qty",0) or 0) > 0)
+            sell_cnt = sum(1 for i in output if int(i.get("orgn_ntby_qty",0) or 0) < 0)
+            total_cnt = len(output) or 1
+            inst_score = float(np.clip(50 + (buy_cnt - sell_cnt) / total_cnt * 30, 0, 100))
+        else:
+            inst_score = float(np.clip(50+(inst_amt+frgn_amt*0.5)/1e7, 0, 100))
+
         return {
             "inst_net":           inst_net,
             "foreign_net":        foreign_net,
             "inst_amt":           inst_amt,
             "frgn_amt":           frgn_amt,
             "inst_score":         inst_score,
-            "foreign_consec":     consec,       # 연속 순매수(+)/순매도(-) 일수
-            "foreign_trend":      round(trend, 2),  # 추이 기울기
+            "foreign_consec":     consec,
+            "foreign_trend":      round(trend, 2),
             "foreign_trend_score":float(np.clip(ft_score, 0, 100)),
         }
 
@@ -329,6 +352,19 @@ class KISApi:
             df["ob_score"]          * 0.25 +
             df["ts_score"].clip(0,200)/200*100 * 0.15
         ).clip(0, 100)
+
+        # ★ institution_score 통일 계산
+        # 기관순매수(60%) + 호가압력(25%) + 체결강도(15%)
+        def _calc_inst(row):
+            inst   = float(row.get("inst_score", 50))
+            ob     = float(row.get("ob_score",   50))
+            ts     = float(row.get("ts_score",   100))
+            # 외국인 추이도 반영
+            ft     = float(row.get("foreign_trend_score", 50))
+            score  = inst*0.50 + ob*0.20 + (ts/200*100)*0.15 + ft*0.15
+            return float(np.clip(score, 0, 100))
+
+        df["institution_score"] = df.apply(_calc_inst, axis=1)
 
         # 호가 + 체결강도 종합 수급 점수
         df["orderbook_score"] = (
