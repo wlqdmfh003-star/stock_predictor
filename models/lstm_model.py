@@ -246,10 +246,9 @@ class LSTMPredictor:
                 num_layers=self.NUM_LAYERS,
                 dropout=self.DROPOUT,
             ).to(self.device)
-            model.load_state_dict(
-                torch.load(self.MODEL_PATH, map_location=self.device,
-                           weights_only=True)
-            )
+            # 로드 시 버전/키 불일치에 대비해 strict=False로 로드
+            state = torch.load(self.MODEL_PATH, map_location=self.device)
+            model.load_state_dict(state, strict=False)
             model.eval()
             self._pretrain_model = model
             self._pretrained     = True
