@@ -560,8 +560,18 @@ if analyze_btn:
             with fg_cols[2]: st.metric("VIX",           f"{fg['vix']:.1f}")
             with fg_cols[3]: st.metric("매크로 환경",   sm["env"])
             with fg_cols[4]: st.metric("매크로 점수",   f"{sm['score']:.1f}점")
-            # 게이지 표시
-            st.progress(min(int(fg["score"]), 100))
+            # 게이지 표시 (NaN/None 안전 처리)
+            try:
+                raw_score = fg.get("score", 0)
+                # handle NaN and non-numeric
+                if raw_score is None or (isinstance(raw_score, float) and pd.isna(raw_score)):
+                    score_int = 0
+                else:
+                    score_int = int(min(max(float(raw_score), 0.0), 100.0))
+                st.progress(score_int)
+            except Exception:
+                # If anything goes wrong, skip rendering the gauge
+                pass
             st.caption(f"{fg['description']}")
             st.markdown("---")
             st.markdown("#### 매크로 지표"); cols3=st.columns(3)
@@ -1103,6 +1113,11 @@ if analyze_btn:
         st.markdown("### 🎯 옵션 전략 분석 — Black-Scholes 기반 끝판왕")
 
         if "option_strategy" in df.columns:
+            # 전체 시장 옵션 시그널을 미리 계산 (opt_signal 미정의 예외 방지)
+            try:
+                opt_signal = OptionStrategy().market_option_signal(df)
+            except Exception:
+                opt_signal = {}
             # 시장 옵션 시그널
             if "opt_signal" in dir() and opt_signal:
                 st.markdown("#### 📡 시장 전체 옵션 시그널")

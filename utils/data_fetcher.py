@@ -1,7 +1,11 @@
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from pykrx import stock as krx
+try:
+    from pykrx import stock as krx
+except Exception:
+    krx = None
+    print("⚠️ pykrx import failed — KRX 기반 데이터는 사용 불가 (pykrx 설치 또는 환경 확인 필요)")
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 import time
@@ -312,7 +316,53 @@ class DataFetcher:
 
             except Exception:
                 continue
-        return None
+        # yfinance 실패(또는 데이터부족) 시 pykrx로 폴백 시도
+        try:
+            start_daily = (datetime.now() - timedelta(days=365)).strftime("%Y%m%d")
+            start_weekly = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
+            start_monthly = (datetime.now() - timedelta(days=365*5)).strftime("%Y%m%d")
+            # 일봉
+            ohlcv_d = krx.get_market_ohlcv_by_date(start_daily, self.today, code)
+            if ohlcv_d is None or len(ohlcv_d) < 60:
+                return None
+            daily = pd.DataFrame(index=pd.to_datetime(ohlcv_d.index))
+            daily["close"] = ohlcv_d["종가"].astype(float).values
+            daily["open"]  = ohlcv_d["시가"].astype(float).values
+            daily["high"]  = ohlcv_d["고가"].astype(float).values
+            daily["low"]   = ohlcv_d["저가"].astype(float).values
+            daily["volume"] = ohlcv_d.get("거래량", pd.Series(0.0, index=ohlcv_d.index)).astype(float).values
+
+            # 주봉
+            weekly = None
+            try:
+                ohlcv_w = krx.get_market_ohlcv_by_date(start_weekly, self.today, code)
+                if ohlcv_w is not None and len(ohlcv_w) >= 10:
+                    weekly = pd.DataFrame(index=pd.to_datetime(ohlcv_w.index))
+                    weekly["close"] = ohlcv_w["종가"].astype(float).values
+                    weekly["open"]  = ohlcv_w["시가"].astype(float).values
+                    weekly["high"]  = ohlcv_w["고가"].astype(float).values
+                    weekly["low"]   = ohlcv_w["저가"].astype(float).values
+                    weekly["volume"] = ohlcv_w.get("거래량", pd.Series(0.0, index=ohlcv_w.index)).astype(float).values
+            except Exception:
+                weekly = None
+
+            # 월봉
+            monthly = None
+            try:
+                ohlcv_m = krx.get_market_ohlcv_by_date(start_monthly, self.today, code)
+                if ohlcv_m is not None and len(ohlcv_m) >= 6:
+                    monthly = pd.DataFrame(index=pd.to_datetime(ohlcv_m.index))
+                    monthly["close"] = ohlcv_m["종가"].astype(float).values
+                    monthly["open"]  = ohlcv_m["시가"].astype(float).values
+                    monthly["high"]  = ohlcv_m["고가"].astype(float).values
+                    monthly["low"]   = ohlcv_m["저가"].astype(float).values
+                    monthly["volume"] = ohlcv_m.get("거래량", pd.Series(0.0, index=ohlcv_m.index)).astype(float).values
+            except Exception:
+                monthly = None
+
+            return {"code":code, "ohlcv":daily, "ohlcv_weekly":weekly, "ohlcv_monthly":monthly}
+        except Exception:
+            return None
 
     # ── 병렬 수집 ────────────────────────────────────────────────────────────
     def fetch_all_parallel(self):
