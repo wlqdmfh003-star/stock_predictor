@@ -1,0 +1,33 @@
+{
+  "avg_return": 0,
+  "avg_sharpe": 3.034,
+  "avg_mdd": 0,
+  "top_5_stocks": [
+    {
+      "code": "487340",
+      "name": "ACE 머니마켓액티브",
+      "rise_prob": 92.0
+    },
+    {
+      "code": "102780",
+      "name": "KODEX 삼성그룹",
+      "rise_prob": 91.77388324803458
+    },
+    {
+      "code": "472150",
+      "name": "TIGER 배당커버드콜액티브",
+      "rise_prob": 89.74578423757373
+    },
+    {
+      "code": "455890",
+      "name": "RISE 머니마켓액티브",
+      "rise_prob": 88.99922803951064
+    },
+    {
+      "code": "278530",
+      "name": "KODEX 200TR",
+      "rise_prob": 87.68525270357743
+    }
+  ],
+  "total_stocks": 50
+}
