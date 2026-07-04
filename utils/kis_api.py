@@ -72,10 +72,34 @@ class KISApi:
             return {"ok":False,"mode":self._mode,"message":"앱키/시크릿키 미입력"}
         try:
             r = self.get_price("005930")
-            if r.get("current_price",0) > 0:
+            price = r.get("current_price", 0)
+            if price > 0:
                 return {"ok":True,"mode":self._mode,
-                        "message":f"[OK] KIS {self._mode} 연결 성공! 삼성전자: {r['current_price']:,}원"}
-            return {"ok":False,"mode":self._mode,"message":"데이터 조회 실패 (장 마감 확인)"}
+                        "message":f"[OK] KIS {self._mode} 연결 성공! 삼성전자: {price:,}원"}
+
+            # ★ 장외시간에도 수급 데이터는 조회 가능
+            # 현재가=0 이어도 API 연결 자체는 됨
+            # 수급 데이터(투자자별 매매) 조회 시도
+            try:
+                from datetime import datetime
+                today = datetime.now().strftime("%Y%m%d")
+                r2 = self._get(
+                    "/uapi/domestic-stock/v1/quotations/inquire-investor",
+                    "FHKST01010900",
+                    {"FID_COND_MRKT_DIV_CODE":"J",
+                     "FID_INPUT_ISCD":"005930",
+                     "FID_INPUT_DATE_1":today,
+                     "FID_INPUT_DATE_2":today,
+                     "FID_PERIOD_DIV_CODE":"D",
+                     "FID_ORG_ADJ_PRC":"0"},
+                )
+                if r2.get("output"):
+                    return {"ok":True,"mode":self._mode,
+                            "message":f"[OK] KIS {self._mode} 연결 성공! (장외시간 - 수급데이터 정상)"}
+            except Exception:
+                pass
+
+            return {"ok":False,"mode":self._mode,"message":"데이터 조회 실패 (API 연결 오류)"}
         except ConnectionError as e:
             return {"ok":False,"mode":self._mode,"message":str(e)}
         except Exception as e:

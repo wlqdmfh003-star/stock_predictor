@@ -22,7 +22,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 st.set_page_config(
-    page_title="📈 내일 주식 상승 예측 v7.2",
+    page_title="📈 주식 프로그램 v10",
     page_icon="📈", layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -83,7 +83,7 @@ from models.ensemble_model   import EnsembleModel
 
 st.markdown("""
 <div class="main-header">
-  <h1>📈 내일 주식 상승 종목 예측 v7.2</h1>
+  <h1>📈 주식 프로그램 </h1>
   <p>LSTM · XGBoost+LightGBM+CatBoost(109개 피처) · 트리플 타임프레임(일봉+주봉+월봉)
   · 일목균형표 · 피보나치 · 엘리어트파동 · CNN패턴 · 캔들패턴 19가지
   · ATR 동적 손절/목표가 · 상관관계 필터 · 요일/월말 효과 · 섹터 yfinance 자동분류
