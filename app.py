@@ -313,7 +313,14 @@ if analyze_btn:
         with st.spinner("🌎 미국 증시 수집 중..."):
             um=USMarket(); us_data=um.fetch(); df=um.apply_to_stocks(df,us_data)
     if use_lstm:
-        with st.spinner("🧠 LSTM 예측 중..."): df=LSTMPredictor().predict_batch(df)
+        with st.spinner("🧠 LSTM 예측 중..."):
+            df = LSTMPredictor().predict_batch(df)
+            # ★ 실제 LSTM vs XGB 폴백 표시
+            lstm_mode = df["lstm_mode"].iloc[0] if "lstm_mode" in df.columns else "LSTM"
+            if lstm_mode == "XGB폴백":
+                st.warning("⚠️ torch 미설치 → XGBoost 폴백 모드로 실행 중 (pip install torch 설치 권장)")
+            else:
+                st.success("✅ LSTM 실제 모드로 실행 중")
     if use_ensemble:
         with st.spinner("🤝 앙상블 (XGB+LGB+CatBoost, 109피처, 트리플 타임프레임) 예측 중..."):
             df=EnsembleModel().predict_batch(df)

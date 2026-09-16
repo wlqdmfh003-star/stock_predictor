@@ -1,3 +1,10 @@
+import sys as _sys
+if _sys.platform == "win32":
+    try:
+        _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
@@ -79,10 +86,10 @@ class LSTMPredictor:
 
         if TORCH_AVAILABLE:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            print(f"🧠 PyTorch LSTM v2.0 (device: {self.device})")
+            print(f"[LSTM] PyTorch v2.0 (device: {self.device})")
             self._load_pretrained()
         else:
-            print("🧠 GradientBoosting 모드")
+            print("[LSTM] GradientBoosting 모드")
 
     # ── 피처 추출 ──────────────────────────────────────────────────
 
@@ -143,7 +150,7 @@ class LSTMPredictor:
             print("✅ 사전학습 모델 이미 로드됨 - 스킵")
             return
 
-        print("🔥 전체 시장 사전학습 시작...")
+        print("[LSTM] 사전학습 시작...")
         print(f"   대상: {len(df)}개 종목")
 
         all_X, all_y = [], []
@@ -366,9 +373,12 @@ class LSTMPredictor:
             return 50.0
 
     def _predict_one(self, ohlcv: pd.DataFrame) -> float:
+        # ★ 실제 LSTM vs XGB 폴백 구분 표시
         if TORCH_AVAILABLE:
+            self._last_used_torch = True   # 실제 LSTM 사용
             return self._predict_torch(ohlcv)
         else:
+            self._last_used_torch = False  # XGB 폴백 사용
             return self._predict_fallback(ohlcv)
 
     # ── 배치 예측 ─────────────────────────────────────────────────
@@ -396,7 +406,7 @@ class LSTMPredictor:
             return df
 
         tag = "사전학습+파인튜닝" if self._pretrained else "개별학습"
-        print(f"🧠 LSTM 예측 중... ({len(uncached_idx)}개 종목, {tag})")
+        print(f"[LSTM] 예측 중... ({len(uncached_idx)}개 종목, {tag})")
 
         def predict_single(idx):
             ohlcv = ohlcvs[idx]
@@ -424,4 +434,9 @@ class LSTMPredictor:
 
         scores = [s if s is not None else 50.0 for s in scores]
         df["lstm_score"] = scores
+        # ★ 실제 LSTM 사용 여부 표시 (Streamlit UI에서 활용)
+        df["lstm_mode"] = "LSTM" if TORCH_AVAILABLE else "XGB폴백"
+        if not TORCH_AVAILABLE:
+            print("[LSTM] ⚠️  torch 미설치 → XGBoost 폴백 모드로 실행 중")
+            print("       → pip install torch 설치 시 실제 LSTM 사용 가능")
         return df

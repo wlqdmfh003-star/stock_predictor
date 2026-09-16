@@ -1,6 +1,10 @@
 import pandas as pd
 import numpy as np
 import warnings
+import sqlite3
+import json
+import os
+from datetime import datetime
 warnings.filterwarnings('ignore')
 
 
@@ -81,11 +85,19 @@ class Backtester:
             except:
                 continue
 
-        return {
+        result = {
             "top":    self._calc_stats(top_rets, top_log),
             "equal":  self._calc_stats(self._avg(eq_lists),  []),
             "market": self._calc_stats(self._avg(mkt_lists), []),
         }
+
+        # ★ 백테스트 결과 → SQLite 저장 (자기학습 연동)
+        try:
+            self._save_bt_result(result["top"], df)
+        except Exception as _e:
+            pass
+
+        return result
 
     # ── ★ 몬테카를로 시뮬레이션 ──────────────────────────────────────────────
     def run_montecarlo(self, df: pd.DataFrame,
@@ -433,6 +445,92 @@ class Backtester:
     def _empty_result(self):
         return {"top":self._empty_stats(),"equal":self._empty_stats(),
                 "market":self._empty_stats()}
+
+    # ★ 백테스트 결과 → SQLite + MySQL 저장
+    def _save_bt_result(self, stats: dict, df=None):
+        db_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..', '.cache', 'learning.db'))
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS backtest_results (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_date     TEXT,
+                    total_return REAL, win_rate REAL,
+                    sharpe       REAL, sortino  REAL,
+                    max_drawdown REAL, pnl_ratio REAL,
+                    top_factors  TEXT,
+                    created_at   TEXT DEFAULT CURRENT_TIMESTAMP
+                )""")
+
+            # 팩터별 상위 종목 평균 점수 추출
+            top_factors = {}
+            if df is not None and len(df) > 0:
+                top_df = df.nlargest(10,'rise_prob') if 'rise_prob' in df.columns else df.head(10)
+                for col in [c for c in df.columns if c.endswith('_score')]:
+                    try:
+                        top_factors[col.replace('_score','')] = round(float(top_df[col].mean()), 2)
+                    except Exception:
+                        pass
+
+            conn.execute("""
+                INSERT INTO backtest_results
+                (run_date, total_return, win_rate, sharpe, sortino, max_drawdown, pnl_ratio, top_factors)
+                VALUES (?,?,?,?,?,?,?,?)""",
+                (datetime.now().strftime("%Y-%m-%d"),
+                 stats.get("total_return",0), stats.get("win_rate",0),
+                 stats.get("sharpe",0),       stats.get("sortino",0),
+                 stats.get("max_drawdown",0), stats.get("pnl_ratio",0),
+                 json.dumps(top_factors, ensure_ascii=False)))
+            conn.commit()
+            print(f"✅ 백테스트 결과 SQLite 저장 완료 (승률: {stats.get('win_rate',0):.1f}%)")
+
+            # 승률 60% 이상이면 MySQL에도 동기화
+            if stats.get("win_rate", 0) >= 60:
+                self._sync_to_mysql(stats, top_factors)
+        finally:
+            conn.close()
+
+    def _sync_to_mysql(self, stats: dict, top_factors: dict):
+        """백테스트 결과 → MySQL 동기화 (stockplanet DB)"""
+        try:
+            import mysql.connector
+            conn = mysql.connector.connect(
+                host     = os.environ.get("MYSQL_HOST",     "localhost"),
+                port     = int(os.environ.get("MYSQL_PORT", 3306)),
+                user     = os.environ.get("MYSQL_USER",     "root"),
+                password = os.environ.get("MYSQL_PASSWORD", "qudtls115!"),
+                database = os.environ.get("MYSQL_DB",       "stockplanet"),
+                connection_timeout = 5,
+            )
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS backtest_results (
+                    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    run_date     DATE,
+                    total_return DECIMAL(8,2), win_rate     DECIMAL(5,2),
+                    sharpe       DECIMAL(8,3), sortino      DECIMAL(8,3),
+                    max_drawdown DECIMAL(8,2), pnl_ratio    DECIMAL(8,3),
+                    top_factors  TEXT,
+                    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+                )""")
+            cur.execute("""
+                INSERT INTO backtest_results
+                (run_date, total_return, win_rate, sharpe, sortino, max_drawdown, pnl_ratio, top_factors)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (datetime.now().strftime("%Y-%m-%d"),
+                 stats.get("total_return",0), stats.get("win_rate",0),
+                 stats.get("sharpe",0),       stats.get("sortino",0),
+                 stats.get("max_drawdown",0), stats.get("pnl_ratio",0),
+                 json.dumps(top_factors, ensure_ascii=False)))
+            conn.commit()
+            cur.close(); conn.close()
+            print("✅ 백테스트 결과 MySQL 동기화 완료")
+        except ImportError:
+            pass  # mysql-connector 없으면 스킵
+        except Exception as _e:
+            pass  # MySQL 실패해도 SQLite는 이미 저장됨
 
     def _empty_wf(self):
         return {"is":self._empty_stats(),"oos":self._empty_stats(),
