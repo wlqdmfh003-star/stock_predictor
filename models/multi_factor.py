@@ -36,10 +36,11 @@ class MultiFactorScorer:
         # ★ 섹터별 분리학습 가중치 적용 (200건 이상 시 자동 활성)
         try:
             from utils.learning_tracker import LearningTracker
-            lt = LearningTracker()
+            lt    = LearningTracker()
             stats = lt.get_stats()
-            if stats.get("total", 0) >= 200 and "sector" in df.columns:
-                # 가장 많은 섹터의 학습된 가중치 사용
+            total = stats.get("total", 0)
+
+            if total >= 200 and "sector" in df.columns:
                 sector_counts = df["sector"].value_counts()
                 if len(sector_counts) > 0:
                     top_sector = sector_counts.index[0]
@@ -47,6 +48,19 @@ class MultiFactorScorer:
                     if sector_w and len(sector_w) > 0:
                         w  = sector_w
                         tw = sum(w.values()) or 1.0
+
+            # ★ 팩터 모멘텀 가중치 (300건 이상 시)
+            if total >= 300:
+                try:
+                    fm_w = lt.calc_factor_momentum(lookback_days=90)
+                    if fm_w:
+                        # 섹터 가중치와 팩터모멘텀 블렌딩 (50:50)
+                        for k in w:
+                            if k in fm_w:
+                                w[k] = w[k] * 0.5 + fm_w[k] * 0.5
+                        tw = sum(w.values()) or 1.0
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -79,7 +93,16 @@ class MultiFactorScorer:
         # ★ sector_score도 원래값 사용
         df["f_sector"] = df["sector_score"].astype(float).clip(0, 100) if "sector_score" in df.columns else pd.Series(50.0, index=df.index)
         df["f_rsi"]         = df["rsi"].apply(self._rsi_score)
-        df["f_macd"]        = df["macd_cross"].fillna(0)*20+50
+        # ★ MACD 개선: 5단계 점수 (골든크로스~데드크로스 연속 반영)
+        def _macd_score(v):
+            v = int(v) if v is not None else 0
+            if   v ==  2: return 80.0   # 골든크로스 당일
+            elif v ==  1: return 65.0   # 상승추세 유지
+            elif v ==  0: return 50.0   # 중립
+            elif v == -1: return 30.0   # 데드크로스 당일
+            elif v == -2: return 40.0   # 하락추세 유지
+            else:         return 50.0
+        df["f_macd"] = df["macd_cross"].fillna(0).apply(_macd_score)
 
         df["total_score"] = (
             df["f_lstm"]        * w.get("lstm",0.12) +
@@ -157,6 +180,53 @@ class MultiFactorScorer:
             pass
 
         df["rise_prob"] = df["total_score"].apply(self._to_prob)
+
+        # ★ 종목별 개인화 자기학습 (데이터 30건 이상인 종목만)
+        try:
+            from utils.learning_tracker import LearningTracker
+            lt    = LearningTracker()
+            stats = lt.get_stats()
+            if stats.get("total", 0) >= 500 and "code" in df.columns:
+                for i, row in df.iterrows():
+                    code = str(row.get("code", ""))
+                    if not code:
+                        continue
+                    stock_w = lt.calc_stock_weights(code)
+                    if not stock_w:
+                        continue
+                    # 종목별 가중치로 rise_prob 미세조정
+                    base = float(df.at[i, "rise_prob"])
+                    adj  = sum(
+                        float(row.get(f"{k}_score", 50) or 50) * v
+                        for k, v in stock_w.items()
+                        if f"{k}_score" in row.index
+                    )
+                    # 기존값 70% + 개인화 30%
+                    df.at[i, "rise_prob"] = float(np.clip(
+                        base * 0.70 + adj * 0.30, 0, 100
+                    ))
+        except Exception:
+            pass
+
+        # ★ 시장 국면 5단계 필터 강화
+        try:
+            import pandas as pd_
+            phase = str(df["market_phase"].iloc[0]) if "market_phase" in df.columns else "중립"
+            if phase == "극단적공포":
+                # 극단적공포: 재무/수급 강한 종목 외 감점
+                strong = (df.get("fundamental_score", pd_.Series(50, index=df.index)) >= 65) |                          (df.get("institution_score",  pd_.Series(50, index=df.index)) >= 65)
+                df.loc[~strong, "rise_prob"] = (df.loc[~strong, "rise_prob"] * 0.75).clip(0,100)
+            elif phase == "공포":
+                # 공포: 재무/수급 약한 종목 감점
+                weak = (df.get("fundamental_score", pd_.Series(50, index=df.index)) < 45) &                        (df.get("institution_score",  pd_.Series(50, index=df.index)) < 45)
+                df.loc[weak, "rise_prob"] = (df.loc[weak, "rise_prob"] * 0.85).clip(0,100)
+            elif phase == "극단적탐욕":
+                # 극단적탐욕: 과매수 종목 감점
+                if "momentum_score" in df.columns:
+                    overbought = df["momentum_score"] > 85
+                    df.loc[overbought, "rise_prob"] = (df.loc[overbought, "rise_prob"] * 0.90).clip(0,100)
+        except Exception:
+            pass
 
         # ATR 동적 손절/목표가
         df = self._calc_atr_prices(df)
@@ -379,6 +449,28 @@ class MultiFactorScorer:
         if "cp_gap_up"     in df.columns: scores += df["cp_gap_up"].fillna(0)*3
         if "cp_gap_down"   in df.columns: scores += df["cp_gap_down"].fillna(0)*3
 
+        # ★ 거래량 급증 + 주가 패턴 결합 보너스
+        try:
+            for i, row in df.iterrows():
+                ohlcv = row.get("ohlcv")
+                if ohlcv is None or len(ohlcv) < 20:
+                    continue
+                close  = ohlcv["close"].astype(float).values
+                volume = ohlcv["volume"].astype(float).values
+                avg_vol   = volume[-20:-1].mean() if len(volume) >= 20 else (volume[:-1].mean() or 1)
+                vol_ratio = volume[-1] / (avg_vol + 1e-9)
+                high_52w  = close[-252:].max() if len(close) >= 252 else close.max()
+                near_high = close[-1] >= high_52w * 0.95
+                price_up  = close[-1] > close[-2] if len(close) >= 2 else False
+                bonus = 0
+                if vol_ratio >= 5 and price_up and near_high:   bonus = 15
+                elif vol_ratio >= 3 and price_up and near_high: bonus = 10
+                elif vol_ratio >= 3 and price_up:               bonus = 6
+                elif vol_ratio >= 5 and not price_up:           bonus = -5
+                scores.iloc[i] = float(np.clip(scores.iloc[i] + bonus, 0, 100))
+        except Exception:
+            pass
+
         # 강한 패턴 보너스 (헤드앤숄더/이중바닥)
         if "candle_pattern" in df.columns:
             bull_strong = ["역헤드앤숄더","이중바닥","새벽별형","상승장악형","세병사"]
@@ -426,10 +518,29 @@ class MultiFactorScorer:
         return df
 
     def _institution_score(self, df):
+        # 기관 순매수 기본 점수
         combined = df["inst_net"].astype(float) + df["foreign_net"].astype(float)*0.5
         mn,mx    = combined.min(), combined.max()
-        return (combined-mn)/(mx-mn+1e-9)*100 if mx-mn>1e-9 \
-               else pd.Series(50.0, index=df.index)
+        base     = (combined-mn)/(mx-mn+1e-9)*100 if mx-mn>1e-9                    else pd.Series(50.0, index=df.index)
+
+        # ★ 외국인 연속 매수/매도 직접 가산 (핵심 신호)
+        if "foreign_consec" in df.columns:
+            def fc_bonus(v):
+                try:
+                    v = int(float(str(v).split(".")[0]))
+                    if   v >= 5:  return +20  # 5일+ 연속매수 → 강력 신호
+                    elif v >= 3:  return +14  # 3일+ 연속매수 → 강한 신호
+                    elif v >= 1:  return +7   # 1~2일 매수
+                    elif v <= -5: return -18  # 5일+ 연속매도 → 강한 경고
+                    elif v <= -3: return -12  # 3일+ 연속매도
+                    elif v <= -1: return -5   # 1~2일 매도
+                    return 0
+                except:
+                    return 0
+            bonus = df["foreign_consec"].apply(fc_bonus)
+            return (base + bonus).clip(0, 100)
+
+        return base
 
     def _rsi_score(self, rsi):
         if   rsi<30: return 75.0
