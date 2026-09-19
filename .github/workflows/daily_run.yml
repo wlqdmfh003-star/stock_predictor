@@ -2,10 +2,10 @@ name: 주식 예측 자동 실행 v7.2
 
 on:
   schedule:
-    - cron: '30 21 * * 1-5'  # 한국시간 06:30 (월~금)
-    - cron: '0 3 * * 1-5'    # 한국시간 12:00 (월~금)
-    - cron: '0 8 * * 1-5'    # 한국시간 17:00 (월~금)
-    - cron: '30 14 * * 1-5'  # 한국시간 23:30 (월~금)
+    - cron: '0 8 * * 1-5'    # 한국시간 17:00 장마감 후 (핵심 실행)
+    - cron: '30 14 * * 1-5'  # 한국시간 23:30 야간 업데이트
+    # 06:30 / 12:00 제거 → 전날 데이터 기반이라 의미 없음
+    # 17:00 실행이 가장 정확 (당일 데이터 완전 반영)
   workflow_dispatch:
 
 jobs:
@@ -30,12 +30,19 @@ jobs:
 
     - name: 패키지 설치
       run: |
+        # 무거운 패키지 캐시 활용
+        pip install --upgrade pip --quiet
         pip install \
-          streamlit pandas numpy yfinance \
-          xgboost lightgbm catboost torch \
-          scikit-learn requests beautifulsoup4 plotly \
-          transformers sentencepiece huggingface_hub scipy \
-          pykrx
+          pandas numpy yfinance \
+          xgboost lightgbm catboost \
+          scikit-learn requests beautifulsoup4 \
+          scipy pykrx --quiet
+        # torch는 CPU 버전만 설치 (용량/시간 절약)
+        pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
+        # transformers는 선택적 설치
+        pip install transformers sentencepiece --quiet 2>/dev/null || echo "transformers 스킵"
+        pip install streamlit plotly huggingface_hub --quiet 2>/dev/null || echo "streamlit 스킵"
+        echo "✅ 패키지 설치 완료"
 
     - name: 분석 실행
       env:
@@ -231,6 +238,63 @@ jobs:
         stats  = tracker.get_stats()
         print(f'저장: {saved}건 / 누적: {stats["total"]}건 / 적중률: {stats["hit_rate"]}%')
 
+        # ★ 웹사이트용 분석 결과 저장 (JSON + pkl)
+        try:
+            import pickle, json as _json, os as _os
+            _os.makedirs(".cache", exist_ok=True)
+            _os.makedirs("docs", exist_ok=True)
+
+            # pkl 저장 (나중에 JSON 변환용)
+            pickle.dump(df, open(".cache/last_analysis.pkl","wb"))
+
+            # 자기학습 통계 저장
+            with open(".cache/learning_stats.json","w", encoding="utf-8") as _f:
+                _json.dump(stats, _f, ensure_ascii=False)
+
+            # 웹사이트용 JSON 직접 생성
+            _cols = ["code","name","sector","theme_tag","rise_prob","current_price",
+                     "target_price","stop_price","change_pct","market_cap",
+                     "institution_score","foreign_consec","momentum_score",
+                     "sentiment_score","fundamental_score","macro_score",
+                     "dart_score","short_score","high52_score","volume_score",
+                     "per","roe","elliott_wave_pos","cnn_pattern"]
+
+            _top50 = []
+            for _i, (_, _row) in enumerate(df.head(50).iterrows()):
+                _item = {}
+                for _c in _cols:
+                    _val = _row.get(_c, None)
+                    try:
+                        if _val is None or str(_val) in ["nan","None",""]:
+                            _item[_c] = None
+                        elif isinstance(_val, (int, float)):
+                            _item[_c] = round(float(_val), 2)
+                        else:
+                            _item[_c] = str(_val)
+                    except Exception:
+                        _item[_c] = None
+                _top50.append(_item)
+
+            from datetime import datetime as _dt
+            _result = {
+                "updated_at": _dt.now().strftime("%Y-%m-%d %H:%M"),
+                "stats": {
+                    "total": stats["total"],
+                    "hit_rate": stats["hit_rate"],
+                    "avg_return": stats["avg_return"]
+                },
+                "top5":  _top50[:5],
+                "top50": _top50,
+                "market_phase": str(df["market_phase"].iloc[0]) if "market_phase" in df.columns else "중립",
+            }
+
+            with open("docs/stockplanet_data.json","w",encoding="utf-8") as _f:
+                _json.dump(_result, _f, ensure_ascii=False, indent=2)
+            print("✅ stockplanet_data.json 저장 완료")
+
+        except Exception as _je:
+            print(f"⚠️ 웹사이트 JSON 저장 실패: {_je}")
+
         # ★ 스태킹 메타모델 가중치 업데이트 (20건 이상 시)
         try:
             from models.ensemble_model import EnsembleModel
@@ -332,9 +396,157 @@ jobs:
                 pass
 
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # ② TOP5 예측 종목
+            # ② TOP5 예측 종목 - 다음날 상승 가능성 최우선 필터
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            top5  = df.head(5)
+            import numpy as np
+
+            def select_top5_tomorrow(df):
+                """
+                다음날 실제로 오를 가능성 높은 종목 선별
+                단순 rise_prob 순위가 아닌
+                복합 조건 필터링 적용
+                """
+                scored = df.copy()
+
+                # ★ 0. ETF/채권/리츠/스팩/우선주 완전 제외
+                ETF_KW = [
+                    'KODEX','TIGER','KBSTAR','ARIRANG','HANARO','KOSEF',
+                    'FOCUS','SOL','ACE','PLUS','RISE','KIWOOM','TIMEFOLIO',
+                    'ETF','리츠','스팩','SPAC','채권','국고채','통안채',
+                    '레버리지','인버스','선물','합성','S&P','나스닥','다우',
+                    '미국','중국','일본','인도','글로벌','커버드콜','배당귀족',
+                    'TDF','200','150','TOP5','ESG','밸류업',
+                ]
+                def is_etf(name):
+                    return any(kw in str(name) for kw in ETF_KW)
+
+                if "name" in scored.columns:
+                    scored = scored[~scored["name"].apply(is_etf)]
+                elif "stockName" in scored.columns:
+                    scored = scored[~scored["stockName"].apply(is_etf)]
+
+                # 우선주 제외 (종목명 끝이 '우','B'로 끝나는 것)
+                def is_preferred(name):
+                    return str(name).endswith(('우','우B','우C','1우','2우'))
+                if "name" in scored.columns:
+                    scored = scored[~scored["name"].apply(is_preferred)]
+
+                print(f"  [ETF/우선주 제외 후] 순수 주식 {len(scored)}개")
+
+                # ★ 1. 기본 필터: rise_prob 55% 이상만 후보
+                pool = scored[scored["rise_prob"] >= 55].copy()
+                if len(pool) < 5:
+                    pool = scored.head(20).copy()
+
+                # ★ 2. 다음날 상승 신호 종합 점수 계산
+                pool["tomorrow_score"] = 0.0
+
+                # 2-1. 외국인 연속 순매수 (강력 신호)
+                if "foreign_consec" in pool.columns:
+                    def fc_score(v):
+                        try:
+                            v = int(float(str(v).split(".")[0]))
+                            if v >= 5: return 25
+                            elif v >= 3: return 18
+                            elif v >= 1: return 10
+                            elif v <= -3: return -15
+                            return 0
+                        except: return 0
+                    pool["tomorrow_score"] += pool["foreign_consec"].apply(fc_score)
+
+                # 2-2. 기관 순매수 점수
+                if "institution_score" in pool.columns:
+                    pool["tomorrow_score"] += (pool["institution_score"].fillna(50) - 50) * 0.4
+
+                # 2-3. 거래량 이상 (세력 개입 신호)
+                if "volume_score" in pool.columns:
+                    pool["tomorrow_score"] += (pool["volume_score"].fillna(50) - 50) * 0.3
+
+                # 2-4. MACD 골든크로스 당일
+                if "macd_cross" in pool.columns:
+                    def macd_bonus(v):
+                        try:
+                            v = int(float(v))
+                            if v == 2: return 20    # 골든크로스 당일
+                            elif v == 1: return 8   # 상승추세
+                            elif v == -1: return -15 # 데드크로스
+                            elif v == -2: return -8  # 하락추세
+                            return 0
+                        except: return 0
+                    pool["tomorrow_score"] += pool["macd_cross"].apply(macd_bonus)
+
+                # 2-5. DART 공시 호재
+                if "dart_score" in pool.columns:
+                    pool["tomorrow_score"] += (pool["dart_score"].fillna(50) - 50) * 0.3
+
+                # 2-6. 공매도 감소 (숏커버링)
+                if "short_score" in pool.columns:
+                    pool["tomorrow_score"] += (pool["short_score"].fillna(50) - 50) * 0.2
+
+                # 2-7. 뉴스 감성 긍정
+                if "sentiment_score" in pool.columns:
+                    pool["tomorrow_score"] += (pool["sentiment_score"].fillna(50) - 50) * 0.2
+
+                # 2-8. 52주 신고가 근접
+                if "high52_score" in pool.columns:
+                    pool["tomorrow_score"] += (pool["high52_score"].fillna(50) - 50) * 0.15
+
+                # 2-9. 전일 대비 상승 + 거래량 증가 (모멘텀)
+                if "momentum_score" in pool.columns:
+                    pool["tomorrow_score"] += (pool["momentum_score"].fillna(50) - 50) * 0.25
+
+                # ★ 3. rise_prob + tomorrow_score 결합 최종 점수
+                pool["final_score"] = (
+                    pool["rise_prob"] * 0.60 +          # 기존 AI 점수 60%
+                    pool["tomorrow_score"].clip(-30, 50) * 0.40  # 내일 상승 신호 40%
+                )
+
+                # ★ 4. KOSPI/KOSDAQ 각 2~3개씩 균형 선발
+                kospi_top  = pool[pool["market"].str.upper() == "KOSPI"].nlargest(3, "final_score")                              if "market" in pool.columns else pd.DataFrame()
+                kosdaq_top = pool[pool["market"].str.upper() == "KOSDAQ"].nlargest(3, "final_score")                              if "market" in pool.columns else pd.DataFrame()
+
+                if len(kospi_top) >= 2 and len(kosdaq_top) >= 2:
+                    # KOSPI 3개 + KOSDAQ 2개 or KOSPI 2개 + KOSDAQ 3개
+                    combined = pd.concat([kospi_top.head(3), kosdaq_top.head(2)])
+                    combined = combined.sort_values("final_score", ascending=False)
+                else:
+                    combined = pool.nlargest(5, "final_score")
+
+                # ★ 5. 동일 종목 연속 출현 방지
+                # .cache/prev_top5.json 에서 이전 TOP5 읽기
+                import json, os
+                prev_codes = []
+                prev_path  = ".cache/prev_top5.json"
+                if os.path.exists(prev_path):
+                    try:
+                        prev_data  = json.load(open(prev_path))
+                        prev_codes = prev_data.get("codes", [])
+                    except: pass
+
+                result = combined.head(5)
+                result_codes = result["code"].tolist() if "code" in result.columns else []
+
+                # 이전 TOP5와 3개 이상 겹치면 → 새 종목으로 교체
+                overlap = [c for c in result_codes if c in prev_codes]
+                if len(overlap) >= 3:
+                    # 겹치는 종목 제외하고 새 종목 추가
+                    fresh = pool[~pool["code"].isin(prev_codes)].nlargest(5, "final_score")
+                    keep  = result[~result["code"].isin(prev_codes)]
+                    result = pd.concat([keep, fresh]).head(5)
+
+                # 현재 TOP5 저장
+                try:
+                    os.makedirs(".cache", exist_ok=True)
+                    json.dump(
+                        {"codes": result["code"].tolist() if "code" in result.columns else [],
+                         "date": today},
+                        open(prev_path, "w")
+                    )
+                except: pass
+
+                return result.head(5)
+
+            top5  = select_top5_tomorrow(df)
             lines = [f'📈 <b>오늘의 TOP5 예측 종목</b> ({today})']
             if market_header:
                 lines.append('')
@@ -518,11 +730,17 @@ jobs:
         git config --global user.email "action@github.com"
         git config --global user.name "GitHub Actions"
         mkdir -p .cache
+        # ★ 웹사이트용 JSON 저장 (base64 방식 - YAML 완전 호환)
+        echo "aW1wb3J0IGpzb24sIG9zLCBwaWNrbGUKaW1wb3J0IHBhbmRhcyBhcyBwZApmcm9tIGRhdGV0aW1lIGltcG9ydCBkYXRldGltZQoKdHJ5OgogICAgcGtsX3BhdGggICA9ICIuY2FjaGUvbGFzdF9hbmFseXNpcy5wa2wiCiAgICBzdGF0c19wYXRoID0gIi5jYWNoZS9sZWFybmluZ19zdGF0cy5qc29uIgogICAgZG9jc19wYXRoICA9ICJkb2NzL3N0b2NrcGxhbmV0X2RhdGEuanNvbiIKICAgIG9zLm1ha2VkaXJzKCJkb2NzIiwgZXhpc3Rfb2s9VHJ1ZSkKCiAgICBkZiAgICA9IHBpY2tsZS5sb2FkKG9wZW4ocGtsX3BhdGgsInJiIikpIGlmIG9zLnBhdGguZXhpc3RzKHBrbF9wYXRoKSBlbHNlIHBkLkRhdGFGcmFtZSgpCiAgICBzdGF0cyA9IGpzb24ubG9hZChvcGVuKHN0YXRzX3BhdGgpKSAgICAgIGlmIG9zLnBhdGguZXhpc3RzKHN0YXRzX3BhdGgpIGVsc2Uge30KICAgIHRvcDUwID0gZGYuaGVhZCg1MCkgaWYgbGVuKGRmKSA+IDAgZWxzZSBwZC5EYXRhRnJhbWUoKQoKICAgIGRlZiBzYWZlX2YodiwgZD0wLjApOgogICAgICAgIHRyeTogcmV0dXJuIGZsb2F0KHYpIGlmIHYgaXMgbm90IE5vbmUgZWxzZSBkCiAgICAgICAgZXhjZXB0OiByZXR1cm4gZAogICAgZGVmIHNhZmVfaSh2LCBkPTApOgogICAgICAgIHRyeTogcmV0dXJuIGludChmbG9hdCh2KSkgaWYgdiBpcyBub3QgTm9uZSBlbHNlIGQKICAgICAgICBleGNlcHQ6IHJldHVybiBkCiAgICBkZWYgc2FmZV9zKHYsIGQ9IiIpOgogICAgICAgIHJldHVybiBzdHIodikgaWYgdiBpcyBub3QgTm9uZSBlbHNlIGQKCiAgICBkZWYgdG9fZGljdChyb3cpOgogICAgICAgIHJldHVybiB7CiAgICAgICAgICAgICJzdG9ja0NvZGUiOiAgICAgICAgc2FmZV9zKHJvdy5nZXQoImNvZGUiKSksCiAgICAgICAgICAgICJzdG9ja05hbWUiOiAgICAgICAgc2FmZV9zKHJvdy5nZXQoIm5hbWUiKSksCiAgICAgICAgICAgICJzZWN0b3IiOiAgICAgICAgICAgc2FmZV9zKHJvdy5nZXQoInNlY3RvciIpKSwKICAgICAgICAgICAgInJpc2VQcm9iIjogICAgICAgICBzYWZlX2Yocm93LmdldCgicmlzZV9wcm9iIiksIDUwKSwKICAgICAgICAgICAgImN1cnJlbnRQcmljZSI6ICAgICBzYWZlX2kocm93LmdldCgiY3VycmVudF9wcmljZSIpKSwKICAgICAgICAgICAgInRhcmdldFByaWNlIjogICAgICBzYWZlX2kocm93LmdldCgidGFyZ2V0X3ByaWNlIikpLAogICAgICAgICAgICAic3RvcFByaWNlIjogICAgICAgIHNhZmVfaShyb3cuZ2V0KCJzdG9wX3ByaWNlIikpLAogICAgICAgICAgICAiaW5zdGl0dXRpb25TY29yZSI6IHNhZmVfZihyb3cuZ2V0KCJpbnN0aXR1dGlvbl9zY29yZSIpLCA1MCksCiAgICAgICAgICAgICJmb3JlaWduQ29uc2VjIjogICAgc2FmZV9pKHJvdy5nZXQoImZvcmVpZ25fY29uc2VjIikpLAogICAgICAgICAgICAibW9tZW50dW1TY29yZSI6ICAgIHNhZmVfZihyb3cuZ2V0KCJtb21lbnR1bV9zY29yZSIpLCA1MCksCiAgICAgICAgICAgICJzZW50aW1lbnRTY29yZSI6ICAgc2FmZV9mKHJvdy5nZXQoInNlbnRpbWVudF9zY29yZSIpLCA1MCksCiAgICAgICAgICAgICJmdW5kYW1lbnRhbFNjb3JlIjogc2FmZV9mKHJvdy5nZXQoImZ1bmRhbWVudGFsX3Njb3JlIiksIDUwKSwKICAgICAgICAgICAgIm1hY3JvU2NvcmUiOiAgICAgICBzYWZlX2Yocm93LmdldCgibWFjcm9fc2NvcmUiKSwgNTApLAogICAgICAgICAgICAiZGFydFNjb3JlIjogICAgICAgIHNhZmVfZihyb3cuZ2V0KCJkYXJ0X3Njb3JlIiksIDUwKSwKICAgICAgICAgICAgInNob3J0U2NvcmUiOiAgICAgICBzYWZlX2Yocm93LmdldCgic2hvcnRfc2NvcmUiKSwgNTApLAogICAgICAgICAgICAiaGlnaDUyU2NvcmUiOiAgICAgIHNhZmVfZihyb3cuZ2V0KCJoaWdoNTJfc2NvcmUiKSwgNTApLAogICAgICAgICAgICAidm9sdW1lU2NvcmUiOiAgICAgIHNhZmVfZihyb3cuZ2V0KCJ2b2x1bWVfc2NvcmUiKSwgNTApLAogICAgICAgICAgICAibHN0bVNjb3JlIjogICAgICAgIHNhZmVfZihyb3cuZ2V0KCJsc3RtX3Njb3JlIiksIDUwKSwKICAgICAgICAgICAgInBlciI6ICAgICAgICAgICAgICBzYWZlX2Yocm93LmdldCgicGVyIikpLAogICAgICAgICAgICAicm9lIjogICAgICAgICAgICAgIHNhZmVfZihyb3cuZ2V0KCJyb2UiKSksCiAgICAgICAgICAgICJjaGFuZ2VQY3QiOiAgICAgICAgc2FmZV9mKHJvdy5nZXQoImNoYW5nZV9wY3QiKSksCiAgICAgICAgfQoKICAgIHJvd3MgICA9IFt0b19kaWN0KHIpIGZvciBfLCByIGluIHRvcDUwLml0ZXJyb3dzKCldCiAgICByZXN1bHQgPSB7CiAgICAgICAgInVwZGF0ZWRfYXQiOiBkYXRldGltZS5ub3coKS5zdHJmdGltZSgiJVktJW0tJWQgJUg6JU0iKSwKICAgICAgICAic3RhdHMiOiAgICAgIHN0YXRzLAogICAgICAgICJ0b3A1IjogICAgICAgcm93c1s6NV0sCiAgICAgICAgInRvcDUwIjogICAgICByb3dzLAogICAgfQogICAganNvbi5kdW1wKHJlc3VsdCwgb3Blbihkb2NzX3BhdGgsICJ3IiwgZW5jb2Rpbmc9InV0Zi04IiksCiAgICAgICAgICAgICAgZW5zdXJlX2FzY2lpPUZhbHNlLCBpbmRlbnQ9MikKICAgIHByaW50KGYiSlNPTiDsoIDsnqUg7JmE66OMICh7bGVuKHJvd3MpfeqwnCDsooXrqqkpIikKCmV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgIHByaW50KGYiSlNPTiDsoIDsnqUg7Iuk7YyoOiB7ZX0iKQogICAgaW1wb3J0IHRyYWNlYmFjazsgdHJhY2ViYWNrLnByaW50X2V4YygpCg==" | base64 -d > /tmp/save_json.py
+        python3 /tmp/save_json.py
+
         git add -f .cache/learning.db 2>/dev/null || true
         git add -f .cache/bayesian_state.json 2>/dev/null || true
         git add -f .cache/rl_state.json 2>/dev/null || true
         git add -f .cache/stacking_weights.json 2>/dev/null || true
         git add -f .cache/meta_weights.json 2>/dev/null || true
+        git add -f .cache/prev_top5.json 2>/dev/null || true
+        git add -f docs/stockplanet_data.json 2>/dev/null || true
         if git diff --staged --quiet; then
           echo "변경사항 없음 - 커밋 스킵"
         else

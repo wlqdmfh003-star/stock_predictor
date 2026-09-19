@@ -312,6 +312,16 @@ if analyze_btn:
     if use_us_market:
         with st.spinner("🌎 미국 증시 수집 중..."):
             um=USMarket(); us_data=um.fetch(); df=um.apply_to_stocks(df,us_data)
+
+    # ★ 실적 캘린더 분석 (EarningsCalendar 호출 누락 수정)
+    if use_earnings_cal:
+        with st.spinner("📅 실적 캘린더 분석 중..."):
+            df = EarningsCalendar().fetch_and_score(df)
+            # ★ 컬럼명 통일 (multi_factor 호환)
+            if "earnings_score" in df.columns and "calendar_bonus" not in df.columns:
+                df["calendar_bonus"] = df["earnings_score"]
+            if "earnings_note" in df.columns and "calendar_note" not in df.columns:
+                df["calendar_note"] = df["earnings_note"]
     if use_lstm:
         with st.spinner("🧠 LSTM 예측 중..."):
             df = LSTMPredictor().predict_batch(df)
@@ -326,12 +336,16 @@ if analyze_btn:
             df=EnsembleModel().predict_batch(df)
 
     # ★ 옵션 전략 파이프라인 (체크 시 실행)
+    opt_signal = {}   # 항상 초기화 (NameError 방지)
     if use_option:
         with st.spinner("🎯 옵션 전략 분석 중..."):
             try:
-                df = OptionStrategy().analyze(df)
+                os_inst = OptionStrategy()
+                df      = os_inst.analyze(df)
+                # ★ 시장 전체 옵션 시그널 생성 (UI 표시용)
+                opt_signal = os_inst.market_option_signal(df)
             except Exception as _oe:
-                pass
+                opt_signal = {}
 
     # ★ sector/theme_tag 최종 안전망 (직접 계산)
     if "sector" not in df.columns or df["sector"].isna().all():
@@ -1110,17 +1124,20 @@ if analyze_btn:
         st.markdown("### 🎯 옵션 전략 분석 — Black-Scholes 기반 끝판왕")
 
         if "option_strategy" in df.columns:
-            # 시장 옵션 시그널
-            if "opt_signal" in dir() and opt_signal:
+            # ★ 시장 옵션 시그널 (opt_signal 직접 체크)
+            _opt = opt_signal if isinstance(opt_signal, dict) and opt_signal else {}
+            if _opt:
                 st.markdown("#### 📡 시장 전체 옵션 시그널")
                 sig_cols = st.columns(5)
-                with sig_cols[0]: st.metric("평균 IV",      f"{opt_signal.get('avg_iv',0):.1f}%")
-                with sig_cols[1]: st.metric("평균 Delta",   f"{opt_signal.get('avg_delta',0):.3f}")
-                with sig_cols[2]: st.metric("고IV 종목",    f"{opt_signal.get('high_iv_count',0)}개")
-                with sig_cols[3]: st.metric("저IV 종목",    f"{opt_signal.get('low_iv_count',0)}개")
-                with sig_cols[4]: st.metric("추천 전략",    opt_signal.get('best_strategy',''))
-                st.info(opt_signal.get('market_signal',''))
+                with sig_cols[0]: st.metric("평균 IV",      f"{_opt.get('avg_iv',0):.1f}%")
+                with sig_cols[1]: st.metric("평균 Delta",   f"{_opt.get('avg_delta',0):.3f}")
+                with sig_cols[2]: st.metric("고IV 종목",    f"{_opt.get('high_iv_count',0)}개")
+                with sig_cols[3]: st.metric("저IV 종목",    f"{_opt.get('low_iv_count',0)}개")
+                with sig_cols[4]: st.metric("추천 전략",    _opt.get('best_strategy','커버드콜'))
+                st.info(_opt.get('market_signal','옵션 시그널 분석 중...'))
                 st.markdown("---")
+            else:
+                st.caption("💡 옵션 전략 분석을 활성화하면 시장 IV 시그널을 볼 수 있어요")
 
             # TOP 20 옵션 전략 테이블
             st.markdown("#### 📊 종목별 옵션 전략 추천")

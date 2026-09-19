@@ -56,7 +56,70 @@ class LearningTracker:
                                    for k in DEFAULT_WEIGHTS},
             })
         saved = self.db.save_predictions(today, records)
+
+        # ★ MySQL 동기화 (ai_predictions 테이블)
+        try:
+            self._sync_to_mysql(today, records)
+        except Exception:
+            pass  # MySQL 실패해도 SQLite는 이미 저장됨
+
         return saved
+
+    def _sync_to_mysql(self, today: str, records: list):
+        """자기학습 예측 데이터 → MySQL ai_predictions 테이블 동기화"""
+        import mysql.connector, json, os
+        conn = mysql.connector.connect(
+            host     = os.environ.get("MYSQL_HOST",     "localhost"),
+            port     = int(os.environ.get("MYSQL_PORT", 3306)),
+            user     = os.environ.get("MYSQL_USER",     "stockplanet"),
+            password = os.environ.get("MYSQL_PASSWORD", "stockplanet1234"),
+            database = os.environ.get("MYSQL_DB",       "stockplanet"),
+            connection_timeout = 5,
+        )
+        cur = conn.cursor()
+
+        # ai_predictions 테이블 없으면 생성
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ai_predictions (
+                id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+                pred_date     DATE        NOT NULL,
+                stock_code    VARCHAR(10) NOT NULL,
+                stock_name    VARCHAR(50),
+                rise_prob     DECIMAL(5,2),
+                actual_return DECIMAL(8,4),
+                hit           TINYINT(1),
+                market_phase  VARCHAR(20),
+                factors_json  TEXT,
+                created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_pred_date (pred_date),
+                INDEX idx_stock_code (stock_code)
+            ) CHARACTER SET utf8mb4
+        """)
+
+        # 오늘 데이터 INSERT (중복 방지: pred_date+stock_code 기준)
+        for r in records:
+            try:
+                cur.execute("""
+                    INSERT INTO ai_predictions
+                        (pred_date, stock_code, stock_name, rise_prob,
+                         actual_return, hit, market_phase, factors_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON DUPLICATE KEY UPDATE
+                        rise_prob=VALUES(rise_prob),
+                        factors_json=VALUES(factors_json)
+                """, (
+                    r["date"], r["code"], r["name"],
+                    r["predicted_prob"], r["actual_return"], r["hit"],
+                    r.get("market_phase","중립"),
+                    json.dumps(r.get("factors",{}), ensure_ascii=False),
+                ))
+            except Exception:
+                pass
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        print(f"✅ MySQL ai_predictions 동기화 완료 ({len(records)}건)")
 
     # ── 실제 결과 업데이트 (자동 미결 처리 포함) ─────────────────────────────
     def update_results(self, df_today: pd.DataFrame) -> int:
@@ -156,6 +219,42 @@ class LearningTracker:
         return result
 
     # ── 강화학습 추천 ─────────────────────────────────────────────────────────
+    def calc_factor_momentum(self, lookback_days: int = 90) -> dict:
+        """★ 팩터 모멘텀: 최근 N일간 잘 맞는 팩터 UP, 못 맞는 팩터 DOWN"""
+        try:
+            from datetime import datetime, timedelta
+            cutoff = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+            with self.db._conn() as conn:
+                rows = conn.execute("""
+                    SELECT factors, hit FROM predictions
+                    WHERE hit IS NOT NULL AND date >= ?
+                    ORDER BY date DESC
+                """, (cutoff,)).fetchall()
+            if len(rows) < 30:
+                return DEFAULT_WEIGHTS.copy()
+            factor_perf = {}
+            for factors_json, hit in rows:
+                try:
+                    factors = json.loads(factors_json) if factors_json else {}
+                    for k, v in factors.items():
+                        if k not in factor_perf:
+                            factor_perf[k] = {"hits": 0, "total": 0}
+                        factor_perf[k]["total"] += 1
+                        factor_perf[k]["hits"]  += int(hit or 0)
+                except Exception:
+                    continue
+            weights = DEFAULT_WEIGHTS.copy()
+            for k in weights:
+                if k in factor_perf and factor_perf[k]["total"] >= 10:
+                    rate = factor_perf[k]["hits"] / factor_perf[k]["total"]
+                    # 적중률 50% 기준으로 조정
+                    adj = (rate - 0.5) * 0.6
+                    weights[k] = float(np.clip(weights[k] * (1 + adj), 0.01, 0.25))
+            total_w = sum(weights.values()) or 1.0
+            return {k: v/total_w for k, v in weights.items()}
+        except Exception:
+            return DEFAULT_WEIGHTS.copy()
+
     def rl_recommend(self, row: dict) -> dict:
         state            = self._make_state(row)
         action, q_vals   = self.rl.act(state)
@@ -764,6 +863,47 @@ class BayesianWeightOptimizer:
     # ══════════════════════════════════════════════════════════════════════════
     # ★ 섹터별 분리 자기학습 (200건 이상 시 활성)
     # ══════════════════════════════════════════════════════════════════════════
+    def calc_stock_weights(self, code: str) -> dict:
+        """★ 종목별 개인화 가중치 - 해당 종목에서 잘 맞는 팩터 UP"""
+        try:
+            with self.db._conn() as conn:
+                rows = conn.execute("""
+                    SELECT factors, hit FROM predictions
+                    WHERE code=? AND hit IS NOT NULL
+                    ORDER BY date DESC LIMIT 50
+                """, (code,)).fetchall()
+            if len(rows) < 10:
+                return {}
+            # 팩터별 적중률 계산
+            factor_hits = {}
+            for factors_json, hit in rows:
+                try:
+                    factors = json.loads(factors_json) if factors_json else {}
+                    for k, v in factors.items():
+                        if k not in factor_hits:
+                            factor_hits[k] = {"hit_sum": 0, "total": 0, "score_sum": 0}
+                        factor_hits[k]["total"] += 1
+                        factor_hits[k]["hit_sum"] += int(hit or 0)
+                        factor_hits[k]["score_sum"] += float(v or 50)
+                except Exception:
+                    continue
+            if not factor_hits:
+                return {}
+            # 적중률 기반 가중치 조정
+            weights = DEFAULT_WEIGHTS.copy()
+            for k in weights:
+                if k in factor_hits and factor_hits[k]["total"] >= 5:
+                    hit_rate = factor_hits[k]["hit_sum"] / factor_hits[k]["total"]
+                    # 적중률 높으면 가중치 UP, 낮으면 DOWN
+                    adj = (hit_rate - 0.5) * 0.5  # -25%~+25%
+                    weights[k] = float(np.clip(weights[k] * (1 + adj), 0.01, 0.30))
+            # 정규화
+            total_w = sum(weights.values()) or 1.0
+            weights = {k: v / total_w for k, v in weights.items()}
+            return weights
+        except Exception:
+            return {}
+
     def calc_sector_weights(self, sector: str) -> dict:
         """
         섹터별 최적 가중치 계산

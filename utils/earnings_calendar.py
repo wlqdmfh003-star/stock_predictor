@@ -70,6 +70,9 @@ class EarningsCalendar:
 
         df["earnings_score"] = scores
         df["earnings_note"]  = notes
+        # ★ multi_factor 호환 컬럼명 추가
+        df["calendar_bonus"] = scores
+        df["calendar_note"]  = notes
         return df
 
     def _score_from_cache(self, cached: dict, today: datetime):

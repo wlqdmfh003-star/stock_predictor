@@ -404,13 +404,24 @@ class MultiFactorScorer:
         if month in [1, 4, 7, 10]:
             bonus -= 1.0    # 실적 불확실성
 
-        df["calendar_bonus"] = bonus
-        df["calendar_note"]  = (
+        # ★ earnings_calendar 결과 통합 (외부에서 calendar_bonus 이미 있으면 합산)
+        if "calendar_bonus" in df.columns:
+            # earnings_calendar에서 계산된 값 + 요일/월말 효과 합산
+            df["calendar_bonus"] = (df["calendar_bonus"].fillna(0) + bonus).clip(-10, 20)
+        else:
+            df["calendar_bonus"] = bonus
+
+        note = (
             f"{'월요일갭업+2 ' if weekday==0 else ''}"
             f"{'금요일청산-1 ' if weekday==4 else ''}"
             f"{'월말수급+2 '   if day>=25   else ''}"
             f"{'실적시즌-1'    if month in [1,4,7,10] else ''}"
         ).strip() or "해당없음"
+
+        if "calendar_note" in df.columns:
+            df["calendar_note"] = df["calendar_note"].fillna("") + " " + note
+        else:
+            df["calendar_note"] = note
 
         return df
 
